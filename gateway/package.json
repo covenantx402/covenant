@@ -1,0 +1,16 @@
+{
+  "name": "tribute-gateway",
+  "version": "1.0.0",
+  "main": "agent-vault.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/smoke.js"
+  },
+  "keywords": [],
+  "author": "TRIBUTE",
+  "license": "MIT",
+  "description": "TRIBUTE x402 gateway — paid agent APIs, credential vault, and on-chain USDG settlement on Robinhood Chain 4663",
+  "dependencies": {
+    "ethers": "^6.17.0"
+  }
+}

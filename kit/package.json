@@ -1,0 +1,42 @@
+{
+  "name": "@tribute/x402-kit",
+  "version": "1.0.0",
+  "description": "TRIBUTE x402 paywall middleware — monetize any endpoint with USDG settlement on Robinhood Chain 4663",
+  "keywords": [
+    "x402",
+    "paywall",
+    "stablecoin",
+    "base",
+    "usdc",
+    "micropayments",
+    "express",
+    "middleware"
+  ],
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p .",
+    "pretest": "npm run build"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "yaml": "^2.5.0"
+  },
+  "peerDependencies": {
+    "express": "^4.19.0 || ^5.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/express": "^4.17.0",
+    "@types/node": "^22.0.0",
+    "express": "^4.19.0",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT",
+  "author": "TRIBUTE"
+}
