@@ -22,7 +22,7 @@ if (!UPSTREAM) { console.error('TRIBUTE_RPC_UPSTREAM missing'); process.exit(1) 
 const AUTH_REQUIRED = new Set([
   'POST /vault/entries', 'DELETE /vault/entries', 'GET /vault/entries', 'POST /vault/broker',
   'POST /wallets/create', 'GET /wallets',
-  'GET /keys', 'DELETE /keys',
+  'GET /keys', 'DELETE /keys', 'DELETE /keys/self',
 ])
 
 // Rate limits (per agent key where authenticated, per IP otherwise).
@@ -113,12 +113,38 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  // Register a paid route. Open by design — the 402 gate is the monetization, not the registry.
+  if (req.method === 'POST' && url === '/x402/apis') {
+    readBody(req, (err, payload) => {
+      if (err) { send(res, 400, { error: 'bad json' }); return }
+      try {
+        const rec = x402r.create(payload || {})
+        send(res, 201, rec)
+      } catch (e) { send(res, 400, { error: e.message || String(e) }) }
+    })
+    return
+  }
+
   if (req.method === 'GET' && url.startsWith('/x402/api/')) {
     const slug = url.slice('/x402/api/'.length).split('/')[0]
     const rec = x402r.get(slug)
     if (!rec) { send(res, 404, { error: 'unknown api' }); return }
-    x402r.bump(slug)
-    send(res, 402, { x402Version: 1, error: 'PAYMENT_REQUIRED', accepts: [x402r.requirement(rec, 'https://tribute.re/x402/api/' + slug)] })
+    const resource = 'https://tribute.re/x402/api/' + slug
+    const paid = facilitator.paymentRecordFor(req.headers['x-payment'], resource)
+    if (!paid) {
+      x402r.bump(slug)
+      const reqt = x402r.requirement(rec, resource)
+      reqt.extra = { ...reqt.extra, spender: facilitator.publicView().spender || null }
+      send(res, 402, { x402Version: 1, error: 'PAYMENT_REQUIRED', accepts: [reqt] })
+      return
+    }
+    // settled on-chain (nonce anchored to a tx) → deliver the resource
+    x402r.log('paid', rec, { status: 200 })
+    send(res, 200, {
+      ok: true, access: 'granted', api: rec.path, price: rec.price,
+      tx: paid.txHash, payer: paid.from, deliveredAt: Date.now(),
+      payload: { message: `TRIBUTE paid resource for ${rec.path} — USDG settled on Robinhood 4663`, sample: true }
+    })
     return
   }
 
@@ -297,7 +323,7 @@ const server = http.createServer(async (req, res) => {
       hits402: x402r.hits(),
       activity24h: inWindow(86400000).length,
       settledUsdg: settled,
-      onchain: { settled: f.settled, totalSettledUsdg: f.totalSettledUsdg, pattern: f.pattern },
+      onchain: { settled: f.settled, totalSettledUsdg: f.totalSettledUsdg, pattern: f.pattern, recent: f.recent || [] },
       sessions: sessions.stats(),
       reputation: reputation.stats(),
       vault: { entries: vault.list().length, brokered: vault.stats().brokered },
@@ -393,6 +419,14 @@ const server = http.createServer(async (req, res) => {
       vault.audit('key-revoke', payload.id || null)
       send(res, had ? 200 : 404, had ? { ok: true } : { error: 'not found' })
     })
+    return
+  }
+
+  // revoke the key that is authenticating this very request (console "revoke" button)
+  if (req.method === 'DELETE' && url === '/keys/self') {
+    const had = keys.revoke(agent.id)
+    vault.audit('key-revoke', agent.id)
+    send(res, had ? 200 : 404, had ? { ok: true } : { error: 'not found' })
     return
   }
 

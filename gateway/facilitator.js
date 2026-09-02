@@ -52,14 +52,21 @@ function load() {
   try {
     fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true })
     if (fs.existsSync(STORE_PATH)) {
-      for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync(STORE_PATH, 'utf8')))) usedNonces.set(k, v)
+      const data = JSON.parse(fs.readFileSync(STORE_PATH, 'utf8'))
+      // v1 shape: { nonce: rec }. v2 shape: { nonces: {...}, log: [...] }
+      if (data.nonces) {
+        for (const [k, v] of Object.entries(data.nonces)) usedNonces.set(k, v)
+        if (Array.isArray(data.log)) for (const r of data.log.slice(0, 100)) settleLog.push(r)
+      } else {
+        for (const [k, v] of Object.entries(data)) usedNonces.set(k, v)
+      }
     }
   } catch (e) { console.error('settlement load failed:', e.message) }
 }
 function save() {
   fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true })
   const tmp = STORE_PATH + '.tmp'
-  fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(usedNonces)))
+  fs.writeFileSync(tmp, JSON.stringify({ nonces: Object.fromEntries(usedNonces), log: settleLog.slice(0, 100) }))
   fs.renameSync(tmp, STORE_PATH)
 }
 load()
@@ -167,10 +174,28 @@ async function settle(intent, signature) {
     settleLog.unshift(rec)
     if (settleLog.length > 100) settleLog.length = 100
     save()
-    return { success: true, payer: intent.from, transaction: receipt.hash, network: 'eip155:4663' }
+    // payment receipt the client replays as X-PAYMENT to unlock the resource
+    const paymentReceipt = Buffer.from(JSON.stringify({ x402Version: 1, intent, txHash: rec.txHash })).toString('base64')
+    return { success: true, payer: intent.from, transaction: receipt.hash, network: 'eip155:4663', payment: paymentReceipt }
   } catch (e) {
     return { success: false, errorReason: 'settle error: ' + String(e.shortMessage || e.message), payer: intent.from }
   }
 }
 
-module.exports = { verify, settle, publicView, DOMAIN, INTENT_TYPES, USDG, CHAIN_ID }
+/**
+ * Decode an X-PAYMENT header (base64 JSON of { intent, txHash }) and confirm
+ * the nonce was settled on-chain for this resource. Returns { txHash, from } or null.
+ */
+function paymentRecordFor(header, resource) {
+  try {
+    if (!header) return null
+    const decoded = JSON.parse(Buffer.from(String(header), 'base64').toString('utf8'))
+    const intent = decoded.intent || decoded
+    const rec = usedNonces.get(intent.nonce)
+    if (!rec) return null
+    if (resource && intent.resource && intent.resource !== resource) return null
+    return { txHash: rec.txHash, from: rec.from, value: rec.value }
+  } catch { return null }
+}
+
+module.exports = { verify, settle, publicView, paymentRecordFor, DOMAIN, INTENT_TYPES, USDG, CHAIN_ID }
