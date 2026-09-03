@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07130c"/>
+      <stop offset="1" stop-color="#0b2415"/>
+    </linearGradient>
+    <linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1ecb74"/>
+      <stop offset="1" stop-color="#0b7a43"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <!-- logo tile -->
+  <g transform="translate(430,175)">
+    <rect width="140" height="140" fill="url(#lg)"/>
+    <g stroke="#fff" stroke-width="15" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M30 42h57" fill="none"/>
+      <path d="M74 20l20 22-20 22" fill="none"/>
+      <path d="M68 42v47" fill="none"/>
+    </g>
+    <circle cx="68" cy="106" r="12" fill="#fff"/>
+  </g>
+  <text x="600" y="400" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="88" font-weight="800" fill="#ffffff" letter-spacing="6">TRIBUTE</text>
+  <text x="600" y="455" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="30" fill="#1ecb74" letter-spacing="2">x402 payment rails + agent infrastructure · Robinhood Chain 4663</text>
+  <text x="600" y="560" text-anchor="middle" font-family="ui-monospace, Menlo, monospace" font-size="22" fill="#5f7a6b">github.com/tributelab/tribute</text>
+</svg>

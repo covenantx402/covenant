@@ -23,6 +23,7 @@ const AUTH_REQUIRED = new Set([
   'POST /vault/entries', 'DELETE /vault/entries', 'GET /vault/entries', 'POST /vault/broker',
   'POST /wallets/create', 'GET /wallets',
   'GET /keys', 'DELETE /keys', 'DELETE /keys/self',
+  'GET /analytics/keys',
 ])
 
 // Rate limits (per agent key where authenticated, per IP otherwise).
@@ -276,6 +277,43 @@ const server = http.createServer(async (req, res) => {
       self: agent ? { id: agent.id, label: agent.label, hits: agent.hits, lastUsed: agent.lastUsed } : null,
       note: 'pass ?address=0x... to score an on-chain payer. scores are derived from settled payments, every claim anchored to a tx hash.',
       leaderboard: reputation.leaderboard(10),
+    })
+    return
+  }
+
+  /* Per-key analytics: agregat ringan untuk console.
+     Hanya boleh diakses dengan agent key (AUTH_REQUIRED), jadi tidak
+     membocorkan data antar-agen. */
+  if (req.method === 'GET' && url === '/analytics/keys') {
+    if (!agent) { send(res, 401, { error: 'missing or invalid agent key' }); return }
+    const all = keys.list().map(k => ({
+      id: k.id,
+      label: k.label,
+      prefix: k.prefix,
+      hits: k.hits || 0,
+      createdAt: k.createdAt,
+      lastUsed: k.lastUsed,
+    }))
+    const now = Date.now()
+    const active = all.filter(k => k.lastUsed && now - k.lastUsed < 24 * 3600 * 1000).length
+    const totalHits = all.reduce((s, k) => s + k.hits, 0)
+    send(res, 200, {
+      self: agent ? {
+        id: agent.id, label: agent.label, prefix: agent.prefix,
+        hits: agent.hits || 0, createdAt: agent.createdAt, lastUsed: agent.lastUsed,
+      } : null,
+      totals: {
+        keys: all.length,
+        active24h: active,
+        hits: totalHits,
+      },
+      // Top key by usage — cukup 5, sisanya tidak perlu dikirim ke UI.
+      top: all.sort((a, b) => b.hits - a.hits).slice(0, 5).map(k => ({
+        label: k.label,
+        prefix: k.prefix,
+        hits: k.hits,
+        lastUsed: k.lastUsed,
+      })),
     })
     return
   }
