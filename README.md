@@ -138,3 +138,15 @@ See `kit/src/middleware.ts` and `examples/`.
 ## License
 
 MIT
+
+## Gateway endpoints
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `GET` | `/x402/apis` | – | registry of paid APIs (network `eip155:4663`, USDG) |
+| `GET` | `/x402/api/:slug` | – | **returns HTTP 402** until paid |
+| `GET` | `/x402/stats` | – | hits, hourly, top paths, on-chain settlements |
+| `POST` | `/facilitator/settle` | – | verify + settle a signed PaymentIntent |
+| `POST` | `/keys` | – | mint an agent key (raw secret shown once) |
+| `GET` | `/analytics/keys` | **key** | per-key usage: self, fleet totals, top 5 |
+| `GET` | `/reputation/:addr` | – | 0-100 score anchored to tx hashes |
