@@ -161,7 +161,21 @@ async function settle(intent, signature) {
 
   const token = new ethers.Contract(USDG, [
     'function transferFrom(address from,address to,uint256 value) returns (bool)',
+    'function balanceOf(address) view returns (uint256)',
+    'function allowance(address,address) view returns (uint256)',
   ], w)
+
+  // pre-flight on-chain state — biar error-nya jelas, bukan 'missing revert data'
+  try {
+    const [bal, allow] = await Promise.all([
+      token.balanceOf(intent.from),
+      token.allowance(intent.from, w.address),
+    ])
+    if (bal < intent.value) return { success: false, errorReason: `payer USDG balance too low — wallet has ${ethers.formatUnits(bal, USDG_DECIMALS)}, needs ${ethers.formatUnits(intent.value, USDG_DECIMALS)}`, payer: intent.from }
+    if (allow < intent.value) return { success: false, errorReason: `USDG allowance too low — approve the facilitator for at least ${ethers.formatUnits(intent.value, USDG_DECIMALS)} USDG, then retry`, payer: intent.from }
+  } catch (e) {
+    return { success: false, errorReason: 'cannot read USDG state from chain — RPC may be busy, retry in a moment', payer: intent.from }
+  }
 
   try {
     const tx = await token.transferFrom(intent.from, intent.to, intent.value)
@@ -184,7 +198,11 @@ async function settle(intent, signature) {
     const paymentReceipt = Buffer.from(JSON.stringify({ x402Version: 1, intent, txHash: rec.txHash })).toString('base64')
     return { success: true, payer: intent.from, transaction: receipt.hash, network: 'eip155:4663', payment: paymentReceipt }
   } catch (e) {
-    return { success: false, errorReason: 'settle error: ' + String(e.shortMessage || e.message), payer: intent.from }
+    const m = String(e.shortMessage || e.message || e)
+    if (/missing revert data|CALL_EXCEPTION/i.test(m)) {
+      return { success: false, errorReason: 'on-chain transfer was rejected by the chain (balance/allowance changed mid-payment) — retry the payment', payer: intent.from }
+    }
+    return { success: false, errorReason: 'settle error: ' + m, payer: intent.from }
   }
 }
 
