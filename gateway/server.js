@@ -29,6 +29,7 @@ const AUTH_REQUIRED = new Set([
 
 // Rate limits (per agent key where authenticated, per IP otherwise).
 // /keys is deliberately the tightest bucket — it's the open onboarding door.
+let deniedCount = 0
 const RATE_LIMITS = {
   'POST /keys': { limit: 5, windowMs: 3600000 },          // 5 keys/hour
   'POST /facilitator/settle': { limit: 60, windowMs: 60000 },  // 60 settles/min
@@ -86,8 +87,14 @@ const server = http.createServer(async (req, res) => {
   // ---- auth gate ----
   const agent = authKey(req)
   if (AUTH_REQUIRED.has(routeTag) && !agent) {
-    vault.audit('auth-denied', null, { route: routeTag })
-    send(res, 401, { error: 'missing or invalid agent key. mint one at POST /keys (open), then send Authorization: Bearer trb_...' })
+    /* Jangan audit setiap 401. Console mem-polling /vault/entries + /wallets
+       tiap 8 detik tanpa key, dan itu membanjiri audit log (200 entri) sampai
+       menutupi aktivitas nyata (settlement, broker). Catat cukup di journal. */
+    deniedCount++
+    if (deniedCount % 25 === 1) {
+      console.log(`[auth] ${deniedCount} denied (terakhir: ${routeTag}) — tidak masuk audit log`)
+    }
+    send(res, 401, { error: 'missing or invalid agent key. mint one at POST /keys (open), then send Authorization: Bearer ***' })
     return
   }
 
