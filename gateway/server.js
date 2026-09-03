@@ -4,6 +4,7 @@
 const http = require('http')
 const https = require('https')
 const x402r = require('./x402-routes')
+const dataProviders = require('./data-providers.js')
 const vault = require('./agent-vault')
 const wallets = require('./wallets')
 const keys = require('./keys')
@@ -147,12 +148,21 @@ const server = http.createServer(async (req, res) => {
       send(res, 402, { x402Version: 1, error: 'PAYMENT_REQUIRED', accepts: [reqt] })
       return
     }
-    // settled on-chain (nonce anchored to a tx) → deliver the resource
+    // settled on-chain (nonce anchored to a tx) → deliver the REAL resource.
+    // payloadFor() hits live feeds (RSS / GeckoTerminal) with a 60s cache.
+    // If upstream is down we still honour the payment receipt — but say so.
+    let payload = null
+    try { payload = await dataProviders.payloadFor(rec.slug) } catch (e) {
+      console.error('payload fetch failed for', rec.slug, e.message)
+    }
     x402r.log('paid', rec, { status: 200 })
     send(res, 200, {
       ok: true, access: 'granted', api: rec.path, price: rec.price,
       tx: paid.txHash, payer: paid.from, deliveredAt: Date.now(),
-      payload: { message: `TRIBUTE paid resource for ${rec.path} — USDG settled on Robinhood 4663`, sample: true }
+      payload: payload || {
+        message: `Payment confirmed for ${rec.path} — upstream feed temporarily unavailable, retry shortly`,
+        tx: paid.txHash, receiptOnly: true,
+      },
     })
     return
   }
