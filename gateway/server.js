@@ -388,6 +388,20 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  // ---- free news feed (same real provider as the paid /news API, cached 60s)
+  // Powers the console Newsroom — clickable headlines, no payment needed.
+  if (req.url === '/x402/news') {
+    try {
+      const payload = await dataProviders.payloadFor('news')
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      res.end(JSON.stringify({ ok: true, ...payload }))
+    } catch (e) {
+      res.writeHead(502, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: false, error: String(e && e.message || e) }))
+    }
+    return
+  }
+
   if (req.url === '/x402/stats') {
     const acts = x402r.activity
     const now = Date.now()
