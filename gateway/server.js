@@ -360,6 +360,34 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  // ---- health: every check is a REAL probe, never a canned 'ok' ----
+  if (req.method === 'GET' && url === '/x402/health') {
+    const t0 = Date.now()
+    let rpc = { ok: false, block: null, ms: null, err: null }
+    try {
+      const tr = Date.now()
+      const bn = await facilitator.currentBlock()
+      rpc = { ok: true, block: Number(bn), ms: Date.now() - tr, err: null }
+    } catch (e) { rpc.err = String(e.message || e).slice(0, 120) }
+    const f = facilitator.publicView()
+    res.end(JSON.stringify({
+      ok: rpc.ok,
+      uptimeSec: Math.round(process.uptime()),
+      version: require('./package.json').version,
+      time: Date.now(),
+      checks: {
+        gateway: { ok: true, ms: Date.now() - t0 },
+        rpc: rpc,
+        settlement: { ok: !!f.spender, settled: f.settled, spender: f.spender },
+        vault: { ok: true, entries: vault.list().length },
+        keys: { ok: true, count: keys.count() },
+        wallets: { ok: true, count: wallets.count() },
+        apis: { ok: true, count: x402r.list().length },
+      },
+    }))
+    return
+  }
+
   if (req.url === '/x402/stats') {
     const acts = x402r.activity
     const now = Date.now()

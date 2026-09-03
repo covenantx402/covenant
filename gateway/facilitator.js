@@ -222,4 +222,10 @@ function paymentRecordFor(header, resource) {
   } catch { return null }
 }
 
-module.exports = { verify, settle, publicView, paymentRecordFor, DOMAIN, INTENT_TYPES, USDG, CHAIN_ID, DOMAIN_NAME, DOMAIN_VERSION }
+
+/** Live block probe for /x402/health — throws if the RPC is unreachable. */
+async function currentBlock() {
+  return provider().send('eth_blockNumber', [])
+}
+
+module.exports = { verify, settle, publicView, paymentRecordFor, DOMAIN, INTENT_TYPES, USDG, CHAIN_ID, DOMAIN_NAME, DOMAIN_VERSION, currentBlock }
