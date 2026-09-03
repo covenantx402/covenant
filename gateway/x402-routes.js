@@ -4,6 +4,10 @@ const fs = require('fs')
 const path = require('path')
 
 const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'
+/* Must match facilitator.js EIP-712 DOMAIN — the 402 body advertises these
+   to the client so the wallet shows the same name the signature uses. */
+const DOMAIN_NAME = 'TRIBUTE'
+const DOMAIN_VERSION = '1'
 const STORE_PATH = process.env.TRIBUTE_ROUTES_STORE ||
   path.join(__dirname, 'data', 'routes.json')
 
@@ -31,7 +35,7 @@ function requirement(route, resource) {
     payTo: route.payTo,
     maxTimeoutSeconds: 60,
     asset: USDG,
-    extra: { name: 'USDG', version: '2' }
+    extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION }
   }
 }
 

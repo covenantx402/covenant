@@ -11,7 +11,13 @@
 // The signed intent is the server's proof-of-authorization to execute transferFrom.
 //
 // EIP-712 domain (verified on-chain via DOMAIN_SEPARATOR):
-//   name "Global Dollar", version "1", chainId 4663, verifyingContract USDG
+//   name "TRIBUTE", version "1", chainId 4663, verifyingContract USDG
+//
+// NOTE: name was "Global Dollar" (the token) before. Wallets flagged that as
+// a phishing-shaped approval: the message claimed to come from the token
+// contract itself. TRIBUTE is the party asking the user to sign, so TRIBUTE
+// is the correct domain name. Must stay in sync with frontend
+// /root/tributex402/src/lib/pay.ts DOMAIN.
 const { ethers } = require('ethers')
 const fs = require('fs')
 const path = require('path')
@@ -19,7 +25,7 @@ const path = require('path')
 const CHAIN_ID = 4663
 const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'
 const USDG_DECIMALS = 6
-const DOMAIN_NAME = 'Global Dollar'
+const DOMAIN_NAME = 'TRIBUTE'
 const DOMAIN_VERSION = '1'
 
 const DOMAIN = {
@@ -198,4 +204,4 @@ function paymentRecordFor(header, resource) {
   } catch { return null }
 }
 
-module.exports = { verify, settle, publicView, paymentRecordFor, DOMAIN, INTENT_TYPES, USDG, CHAIN_ID }
+module.exports = { verify, settle, publicView, paymentRecordFor, DOMAIN, INTENT_TYPES, USDG, CHAIN_ID, DOMAIN_NAME, DOMAIN_VERSION }

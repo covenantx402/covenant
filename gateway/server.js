@@ -8,6 +8,7 @@ const vault = require('./agent-vault')
 const wallets = require('./wallets')
 const keys = require('./keys')
 const facilitator = require('./facilitator')
+const { DOMAIN_NAME, DOMAIN_VERSION } = require('./facilitator')
 const ratelimit = require('./ratelimit')
 const sessions = require('./sessions')
 const reputation = require('./reputation')
@@ -175,7 +176,7 @@ const server = http.createServer(async (req, res) => {
         payTo,
         maxTimeoutSeconds: 60,
         asset: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168',
-        extra: { name: 'USDG', version: '2', spender: (facilitator.publicView().spender || null) }
+        extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION, spender: (facilitator.publicView().spender || null) }
       },
       {
         // session option: pay once, call N times (Stripe MPP-style session intent)
@@ -188,7 +189,7 @@ const server = http.createServer(async (req, res) => {
         payTo,
         maxTimeoutSeconds: 60,
         asset: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168',
-        extra: { name: 'USDG', version: '2', spender: (facilitator.publicView().spender || null), calls: 100, ttlSec: 3600 }
+        extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION, spender: (facilitator.publicView().spender || null), calls: 100, ttlSec: 3600 }
       }]
     })
     res.statusCode = 402
