@@ -80,6 +80,7 @@ const articleCache = new Map() // url -> {t, json}
 const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Headers', 'content-type,authorization,x-api-key,x-payment')
+  res.setHeader('Access-Control-Expose-Headers', 'X-PAYMENT,Content-Type')
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS')
   res.setHeader('Content-Type', 'application/json')
   if (req.method === 'OPTIONS') { res.end(); return }
@@ -387,6 +388,32 @@ const server = http.createServer(async (req, res) => {
         apis: { ok: true, count: x402r.list().length },
       },
     }))
+    return
+  }
+
+  // ---- public leaderboard: real settlement history, grouped by payer
+  if (req.url === '/x402/leaderboard') {
+    const log = facilitator.settleLogAll()
+    const routeOf = (r) => { try { const pn = new URL(r).pathname; return pn.includes('/api/') ? '/api' + pn.slice(pn.indexOf('/api/') + 4) : pn } catch (e) { return 'general' } }
+    const byPayer = new Map()
+    const byRoute = new Map()
+    for (const e of log) {
+      if (!e.payer) continue
+      const amt = Number(e.valueFormatted || 0)
+      const rt = e.resource ? routeOf(e.resource) : 'general'
+      const p = byPayer.get(e.payer) || { payer: e.payer, count: 0, usdg: 0, last: 0, routes: new Set() }
+      p.count += 1; p.usdg += amt; p.last = Math.max(p.last, e.t || 0); p.routes.add(rt)
+      byPayer.set(e.payer, p)
+      const r = byRoute.get(rt) || { route: rt, count: 0, usdg: 0 }
+      r.count += 1; r.usdg += amt
+      byRoute.set(rt, r)
+    }
+    const payers = [...byPayer.values()]
+      .map((x) => ({ payer: x.payer, count: x.count, usdg: Math.round(x.usdg * 10000) / 10000, last: x.last, routes: [...x.routes].slice(0, 6) }))
+      .sort((a, b) => b.count - a.count || b.usdg - a.usdg)
+      .slice(0, 20)
+    const routes = [...byRoute.values()].sort((a, b) => b.count - a.count)
+    send(res, 200, { payers, routes, totalPayers: byPayer.size, totalSettled: log.length })
     return
   }
 

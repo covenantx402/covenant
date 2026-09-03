@@ -228,4 +228,6 @@ async function currentBlock() {
   return provider().send('eth_blockNumber', [])
 }
 
-module.exports = { verify, settle, publicView, paymentRecordFor, DOMAIN, INTENT_TYPES, USDG, CHAIN_ID, DOMAIN_NAME, DOMAIN_VERSION, currentBlock }
+function settleLogAll() { return settleLog }
+
+module.exports = { verify, settle, publicView, paymentRecordFor, settleLogAll, DOMAIN, INTENT_TYPES, USDG, CHAIN_ID, DOMAIN_NAME, DOMAIN_VERSION, currentBlock }
