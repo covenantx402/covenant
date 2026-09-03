@@ -75,6 +75,8 @@ function readBody(req, cb) {
   })
 }
 
+const articleCache = new Map() // url -> {t, json}
+
 const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Headers', 'content-type,authorization,x-api-key,x-payment')
@@ -385,6 +387,56 @@ const server = http.createServer(async (req, res) => {
         apis: { ok: true, count: x402r.list().length },
       },
     }))
+    return
+  }
+
+  // ---- in-app article reader: fetches the source page and extracts
+  // the body text so the console can render the story WITHOUT leaving it.
+  if (req.url.startsWith('/x402/article?')) {
+    const u = new URL(req.url, 'http://x')
+    const target = u.searchParams.get('url') || ''
+    let tu
+    try {
+      tu = new URL(target)
+    } catch {
+      return send(res, 400, { error: 'bad url param' })
+    }
+    const ALLOWED_HOSTS = ['cointelegraph.com', 'theblock.co', 'decrypt.co', 'bitcoinmagazine.com', 'coindesk.com']
+    const bare = tu.hostname.replace(/^www\./, '')
+    if (!/^https:$/.test(tu.protocol) || !ALLOWED_HOSTS.some((h) => bare === h || bare.endsWith('.' + h))) {
+      return send(res, 400, { error: 'host not allowed' })
+    }
+    const cached = articleCache.get(target)
+    if (cached && Date.now() - cached.t < 10 * 60 * 1000) {
+      return send(res, 200, cached.json)
+    }
+    try {
+      const r = await fetch('https://r.jina.ai/' + target, {
+        headers: { 'User-Agent': 'tribute-console/1.0', 'Accept': 'text/plain' },
+        signal: AbortSignal.timeout(15000),
+      })
+      if (!r.ok) return send(res, 502, { error: 'reader upstream ' + r.status })
+      const raw = await r.text()
+      const { title: aTitle, published: aPub, body } = require('./article-extract').extractArticle(raw)
+      const title = aTitle || tu.pathname.split('/').pop().replace(/-/g, ' ')
+      const published = aPub || null
+      const words = body.split(/\s+/).length
+      const payload = {
+        provider: 'in-app reader (r.jina.ai)', v: 3,
+        source: tu.hostname.replace(/^www\./, ''),
+        url: target,
+        title,
+        published,
+        words,
+        minutes: Math.max(1, Math.round(words / 220)),
+        body: body.slice(0, 12000),
+        fetchedAt: Date.now(),
+      }
+      articleCache.set(target, { t: Date.now(), json: payload })
+      send(res, 200, payload)
+    } catch (e) {
+      send(res, 502, { error: 'reader failed: ' + (e && e.message ? e.message : String(e)) })
+    }
     return
   }
 
