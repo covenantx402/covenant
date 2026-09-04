@@ -481,6 +481,67 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  // ---- usage dashboard data: daily hit/payment counts + per-API breakdown.
+  // Free by design (like /x402/stats) — it only exposes aggregate counts.
+  if (req.url === '/x402/usage') {
+    const acts = x402r.activity
+    const now = Date.now()
+    const DAY = 86400000
+    const days = 14
+    const grid = Array.from({ length: days }, (_, i) => {
+      const d = new Date(now - (days - 1 - i) * DAY)
+      return { date: d.toISOString().slice(0, 10), hits: 0, paid: 0, usdg: 0 }
+    })
+    const byApi = new Map()
+    for (const a of acts) {
+      const idx = days - 1 - Math.floor((now - a.t) / DAY)
+      if (idx >= 0 && idx < days) {
+        grid[idx].hits += 1
+        if (a.kind === 'paid') { grid[idx].paid += 1; grid[idx].usdg += Number(a.price || 0) }
+      }
+      const k = a.path || '/' + (a.slug || 'unknown')
+      const row = byApi.get(k) || { api: k, price: a.price || '0', hits: 0, paid: 0, usdg: 0, lastT: 0 }
+      row.hits += 1
+      if (a.kind === 'paid') { row.paid += 1; row.usdg += Number(a.price || 0) }
+      row.lastT = Math.max(row.lastT, a.t || 0)
+      byApi.set(k, row)
+    }
+    const apis = [...byApi.values()].sort((a, b) => b.hits - a.hits)
+      .map(r => ({ ...r, usdg: Math.round(r.usdg * 10000) / 10000 }))
+    const f = facilitator.publicView()
+    send(res, 200, {
+      days: grid,
+      apis,
+      totals: {
+        hits: acts.length,
+        paid: acts.filter(a => a.kind === 'paid').length,
+        usdg: Math.round(acts.filter(a => a.kind === 'paid').reduce((s, a) => s + Number(a.price || 0), 0) * 10000) / 10000,
+        onchainSettled: f.settled,
+        onchainUsdg: Math.round(f.totalSettledUsdg * 10000) / 10000,
+      },
+      windowNote: 'activity log holds the most recent 80 gate events',
+    })
+    return
+  }
+
+  // ---- billing history: real on-chain settlements from the settle log.
+  if (req.url === '/x402/billing') {
+    const log = facilitator.settleLogAll()
+    const routeOf = (r) => { try { const pn = new URL(r).pathname; return pn.includes('/api/') ? '/api' + pn.slice(pn.indexOf('/api/') + 4) : pn } catch (e) { return 'general' } }
+    const rows = log.map(e => ({
+      t: e.t,
+      api: e.resource ? routeOf(e.resource) : 'general',
+      payer: e.payer,
+      payTo: e.to,
+      usdg: Number(e.valueFormatted || 0),
+      txHash: e.txHash,
+      gasUsed: e.gasUsed || null,
+    }))
+    const total = Math.round(rows.reduce((s, r) => s + r.usdg, 0) * 10000) / 10000
+    send(res, 200, { rows, count: rows.length, totalUsdg: total })
+    return
+  }
+
   if (req.url === '/x402/stats') {
     const acts = x402r.activity
     const now = Date.now()

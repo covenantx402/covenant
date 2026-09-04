@@ -145,11 +145,63 @@ async function signals() {
   return { kind: 'momentum-signals', chain: 'robinhood-4663', derivedFrom: 'geckoterminal trending + top-liquidity', fetchedAt: new Date().toISOString(), count: rows.length, signals: rows }
 }
 
+/* ---- /market-analytics : derived market structure from live pool data ---- */
+async function analytics() {
+  const [tr, wh] = await Promise.all([
+    cached('trending', trending),
+    cached('whales', whales),
+  ])
+  const seen = new Set()
+  const pools = []
+  for (const p of [...tr.pools, ...wh.pools]) {
+    if (seen.has(p.address)) continue
+    seen.add(p.address)
+    pools.push(p)
+  }
+  const liq = pools.map(p => parseFloat(p.liquidityUsd || '0')).sort((a, b) => b - a)
+  const totalLiq = liq.reduce((s, v) => s + v, 0)
+  const totalVol = pools.reduce((s, p) => s + parseFloat(p.volume24hUsd || '0'), 0)
+  const totalTxns = pools.reduce((s, p) => s + (p.txns24h || 0), 0)
+  const top5Liq = liq.slice(0, 5).reduce((s, v) => s + v, 0)
+  let gainers = 0, losers = 0
+  const ranked = pools.map(p => {
+    const chg = parseFloat(p.change24hPct || '0')
+    const vol = parseFloat(p.volume24hUsd || '0')
+    const l = parseFloat(p.liquidityUsd || '0')
+    if (chg > 5) gainers++
+    if (chg < -5) losers++
+    // turnover-weighted momentum score: hot + liquid + moving
+    const turnover = l ? vol / l : 0
+    const score = +(chg * 0.6 + Math.min(turnover, 5) * 4).toFixed(2)
+    return { pool: p.pool, address: p.address, change24hPct: chg, liquidityUsd: l, volume24hUsd: vol, turnover: +turnover.toFixed(2), txns24h: p.txns24h, score }
+  }).sort((a, b) => b.score - a.score)
+  if (!ranked.length) throw new Error('no pools')
+  return {
+    kind: 'market-analytics',
+    chain: 'robinhood-4663',
+    provider: 'derived from geckoterminal trending + top-liquidity',
+    fetchedAt: new Date().toISOString(),
+    metrics: {
+      poolsObserved: ranked.length,
+      totalLiquidityUsd: +totalLiq.toFixed(0),
+      totalVolume24hUsd: +totalVol.toFixed(0),
+      totalTxns24h: totalTxns,
+      volumeLiquidityRatio: totalLiq ? +(totalVol / totalLiq).toFixed(3) : null,
+      liquidityConcentrationTop5: totalLiq ? +(top5Liq / totalLiq).toFixed(3) : null,
+      moversUp: gainers,
+      moversDown: losers,
+      breadth: gainers + losers ? +(gainers / (gainers + losers)).toFixed(2) : null,
+    },
+    pools: ranked.slice(0, 15),
+  }
+}
+
 const PROVIDERS = {
   news: () => cached('news', news),
   alerts: () => cached('trending', trending),
   'whale-alerts': () => cached('whales', whales),
   signals: () => cached('signals', signals),
+  'market-analytics': () => cached('analytics', analytics),
 }
 
 // Resolve the payload for a route slug. Unknown slugs get a generic

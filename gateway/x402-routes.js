@@ -129,6 +129,7 @@ function seed() {
   const defaults = [
     { path: '/alerts', price: '0.01', description: 'TRIBUTE whale alerts — USDG on Robinhood 4663' },
     { path: '/signals', price: '0.05', description: 'TRIBUTE agent signals — USDG on Robinhood 4663' },
+    { path: '/market-analytics', price: '0.05', description: 'TRIBUTE market analytics — liquidity, breadth, turnover rankings on Robinhood 4663' },
   ]
   for (const d of defaults) {
     try { create(d) } catch { /* already present */ }
