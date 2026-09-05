@@ -184,19 +184,39 @@ const server = http.createServer(async (req, res) => {
     }
     // settled on-chain (nonce anchored to a tx) → deliver the REAL resource.
     if (mkt) {
-      // marketplace listing: proxy the seller's upstream JSON, credit earnings
-      let payload = null
-      try { payload = await marketplace.fetchJson(mkt.upstream) } catch (e) {
-        console.error('marketplace upstream fetch failed for', slug, e.message)
+      // marketplace listing: proxy the seller's upstream JSON.
+      // Seller earning is finalized (95% pushed on-chain) ONLY after the buyer
+      // actually received the payload. If the seller's endpoint fails, the
+      // buyer is refunded in full from the facilitator wallet (best-effort).
+      let payload = null, fetchErr = null
+      try { payload = await marketplace.fetchJson(mkt.upstream) } catch (e) { fetchErr = e.message }
+      let splitLegs = null, refund = null
+      if (payload) {
+        try { splitLegs = await facilitator.finalizeSplits(paid.txHash) }
+        catch (e) { console.error('finalize splits failed', slug, e.message) }
+        if (splitLegs && splitLegs.length) {
+          const { sellerShare } = marketplace.splitPrice(mkt.price)
+          marketplace.recordSettle(slug, { sellerShareAtomic: sellerShare })
+        }
+      } else {
+        marketplace.recordFail(slug)
+        facilitator.cancelSplits(paid.txHash)
+        try {
+          refund = await facilitator.refundPayment({ to: paid.from, value: paid.value, reason: `upstream fail ${slug}: ${fetchErr}` })
+          const { sellerShare } = marketplace.splitPrice(mkt.price)
+          marketplace.recordRefund(slug, { sellerShareAtomic: sellerShare })
+        } catch (e) { console.error('refund failed for', slug, e.message) }
       }
       x402r.log('paid', { slug, path: '/api/' + slug, price: mkt.price }, { status: 200 })
       send(res, 200, {
         ok: true, access: 'granted', api: '/api/' + slug, price: mkt.price,
         marketplace: true, seller: mkt.seller,
         tx: paid.txHash, payer: paid.from, deliveredAt: Date.now(),
+        sellerPayment: splitLegs && splitLegs[0] ? { tx: splitLegs[0].txHash } : undefined,
+        refund: refund ? { sent: true, tx: refund.txHash, amount: ethers.formatUnits(BigInt(paid.value), 6) } : undefined,
         payload: payload || {
-          message: `Payment confirmed for ${mkt.name} — seller endpoint temporarily unavailable, retry shortly`,
-          tx: paid.txHash, receiptOnly: true,
+          message: `Payment confirmed for ${mkt.name} — seller endpoint failed (${fetchErr}). Your payment has been refunded${refund ? '' : ' processing'}.`,
+          tx: paid.txHash, refunded: !!refund, receiptOnly: true,
         },
       })
       return
@@ -303,20 +323,6 @@ const server = http.createServer(async (req, res) => {
             txHash: v.transaction,
           })
           const extra = payload.extra || {}
-          // marketplace accounting: credit the seller only for legs that
-          // actually landed on-chain (see serverSplitsFor / facilitator.settle)
-          if (v.success && Array.isArray(v.splits)) {
-            const res = String(payload.intent?.resource || '')
-            if (res.includes('/x402/api/')) {
-              const mslug = res.split('/x402/api/')[1].split(/[/?#]/)[0]
-              for (const leg of v.splits) {
-                const mkt = marketplace.get(mslug)
-                if (mkt && leg.to && leg.to.toLowerCase() === mkt.seller.toLowerCase()) {
-                  marketplace.recordSettle(mslug, { sellerShareAtomic: leg.value })
-                }
-              }
-            }
-          }
           if (String(payload.intent?.resource) === 'session' || extra.session) {
             const s = sessions.open({
               payer: v.payer,

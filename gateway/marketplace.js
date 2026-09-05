@@ -12,6 +12,7 @@
 const fs = require('fs')
 const path = require('path')
 const dns = require('dns')
+const http = require('http')
 const https = require('https')
 const { URL } = require('url')
 const { ethers } = require('ethers')
@@ -110,17 +111,18 @@ function isPrivateIp(ip) {
 async function assertSafeUpstream(rawUrl) {
   let u
   try { u = new URL(rawUrl) } catch { throw new Error('upstream must be a valid URL') }
-  if (u.protocol !== 'https:') throw new Error('upstream must be https')
+  const loopbackOk = process.env.TRIBUTE_ALLOW_LOOPBACK_UPSTREAM === '1' // staging tests only
+  if (u.protocol !== 'https:' && !(loopbackOk && u.protocol === 'http:' && /^(127\.|::1|localhost)/.test(u.hostname))) throw new Error('upstream must be https')
   if (u.username || u.password) throw new Error('upstream URL must not embed credentials')
   const host = u.hostname
-  if (/^(localhost|.*\.local|.*\.internal|metadata\.)$/i.test(host)) throw new Error('upstream host not allowed')
+  if (/^(.*\.local|.*\.internal|metadata\.)$/i.test(host)) throw new Error('upstream host not allowed')
   if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
-    if (isPrivateIp(host)) throw new Error('upstream must be a public address')
+    if (isPrivateIp(host) && !loopbackOk) throw new Error('upstream must be a public address')
     return u
   }
   const addrs = await dns.promises.lookup(host, { all: true })
   if (!addrs.length) throw new Error('upstream host does not resolve')
-  if (addrs.some(a => isPrivateIp(a.address))) throw new Error('upstream resolves to a private address')
+  if (addrs.some(a => isPrivateIp(a.address)) && !loopbackOk) throw new Error('upstream resolves to a private address')
   return u
 }
 
@@ -153,6 +155,10 @@ async function createListing({ name, description, upstream, price, seller, signa
   usedNonces.add(nonce)
 
   const slug = uniqueSlug(slugify(name))
+  // Phase-1 guard: probe the seller's endpoint once. A listing that can't
+  // answer with JSON today would only produce refunds later — reject it now.
+  try { await fetchJson(String(upstream), 8000) }
+  catch (e) { throw new Error(`upstream test failed — endpoint must answer GET with JSON (200): ${e.message}`) }
   const rec = {
     slug,
     kind: 'external',
@@ -165,7 +171,10 @@ async function createListing({ name, description, upstream, price, seller, signa
     createdAt: Date.now(),
     hits: 0,
     paid: 0,
+    failed: 0,
+    refunded: 0,
     earnedAtomic: '0',
+    refundedAtomic: '0',
   }
   listings.set(slug, rec)
   save()
@@ -195,6 +204,7 @@ function catalog() {
     .map(l => ({
       slug: l.slug, name: l.name, description: l.description, price: l.price,
       seller: l.seller, hits: l.hits, paid: l.paid,
+      failed: l.failed || 0, refunded: l.refunded || 0,
       earned: ethers.formatUnits(BigInt(l.earnedAtomic || 0), 6),
       createdAt: l.createdAt,
     }))
@@ -202,6 +212,17 @@ function catalog() {
 function recordHit(slug) {
   const l = listings.get(slug)
   if (l) { l.hits = (l.hits || 0) + 1; save() }
+}
+function recordFail(slug) {
+  const l = listings.get(slug)
+  if (l) { l.failed = (l.failed || 0) + 1; save() }
+}
+function recordRefund(slug, { sellerShareAtomic }) {
+  const l = listings.get(slug)
+  if (!l) return
+  l.refunded = (l.refunded || 0) + 1
+  l.refundedAtomic = String(BigInt(l.refundedAtomic || 0) + BigInt(sellerShareAtomic || 0))
+  save()
 }
 function recordSettle(slug, { sellerShareAtomic }) {
   const l = listings.get(slug)
@@ -217,9 +238,11 @@ function earningsFor(seller) {
     feeBps: FEE_BPS,
     listings: mine.map(l => ({
       slug: l.slug, name: l.name, status: l.status, price: l.price,
-      hits: l.hits, paid: l.paid, earned: ethers.formatUnits(BigInt(l.earnedAtomic || 0), 6),
+      hits: l.hits, paid: l.paid, failed: l.failed || 0, refunded: l.refunded || 0,
+      earned: ethers.formatUnits(BigInt(l.earnedAtomic || 0), 6),
     })),
     totalPaid: mine.reduce((s, l) => s + (l.paid || 0), 0),
+    totalRefunded: mine.reduce((s, l) => s + (l.refunded || 0), 0),
     totalEarned: ethers.formatUnits(mine.reduce((s, l) => s + BigInt(l.earnedAtomic || 0), 0n), 6),
   }
 }
@@ -237,14 +260,15 @@ function requirement(rec, resource, spender) {
     payTo: spender, // lands on the facilitator wallet; seller leg is pushed at settle
     maxTimeoutSeconds: 60,
     asset: USDG,
-    extra: { name: DOMAIN.name, version: DOMAIN.version, marketplace: true, seller: rec.seller, feeBps: FEE_BPS },
+    extra: { name: DOMAIN.name, version: DOMAIN.version, marketplace: true, seller: rec.seller, feeBps: FEE_BPS, spender },
   }
 }
 
 /* ---------- upstream fetch (post-payment delivery) ---------- */
 function fetchJson(urlStr, timeoutMs = 8000, depth = 0) {
   return new Promise((resolve, reject) => {
-    https.get(urlStr, { headers: { accept: 'application/json', 'user-agent': 'TRIBUTE-marketplace/1.0' }, timeout: timeoutMs }, res => {
+    const lib = String(urlStr).startsWith('http:') ? http : https
+    lib.get(urlStr, { headers: { accept: 'application/json', 'user-agent': 'TRIBUTE-marketplace/1.0' }, timeout: timeoutMs }, res => {
       if (res.statusCode >= 301 && res.statusCode <= 308 && res.headers.location && depth < 2) {
         res.resume()
         resolve(fetchJson(new URL(res.headers.location, urlStr).toString(), timeoutMs, depth + 1))
@@ -263,7 +287,7 @@ function fetchJson(urlStr, timeoutMs = 8000, depth = 0) {
 load()
 
 module.exports = {
-  createListing, revoke, get, catalog, recordHit, recordSettle, earningsFor,
+  createListing, revoke, get, catalog, recordHit, recordFail, recordRefund, recordSettle, earningsFor,
   fetchJson, assertSafeUpstream, splitPrice, setReservedSlugCheck, requirement,
   DOMAIN, LISTING_TYPES, REVOKE_TYPES, FEE_BPS, listings,
 }

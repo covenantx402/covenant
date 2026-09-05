@@ -199,24 +199,15 @@ async function settle(intent, signature, splits = null) {
     if (settleLog.length > 100) settleLog.length = 100
     save()
 
-    // Marketplace fee split: the full pull already landed on the facilitator
-    // wallet (intent.to). Push the seller leg from there; the fee leg stays.
-    // Best-effort — a failed leg never voids the buyer's payment.
-    let splitTx = null
+    // Marketplace fee split: the full pull lands on the facilitator wallet
+    // (intent.to). The seller leg is NOT pushed here — it is deferred until
+    // the gateway confirms the buyer actually received the seller's payload
+    // (finalizeSplits after delivery). That way a failed upstream can be
+    // refunded in full without clawing back from the seller. Best-effort.
     if (Array.isArray(splits) && splits.length) {
       const total = splits.reduce((s, x) => s + BigInt(x.value), 0n)
       if (total <= BigInt(intent.value)) {
-        for (const leg of splits) {
-          try {
-            const t2 = await token.transfer(leg.to, leg.value)
-            const r2 = await t2.wait()
-            splitTx = splitTx || []
-            splitTx.push({ to: leg.to, value: String(leg.value), txHash: r2.hash })
-          } catch (e) {
-            console.error('split leg failed:', leg.to, String(e.shortMessage || e.message))
-          }
-        }
-        rec.splits = splitTx || null
+        rec.pendingSplits = splits.map(s => ({ to: s.to, value: String(s.value) }))
         save()
       } else {
         console.error('settle: split total exceeds payment — skipping legs', String(total), '>', String(intent.value))
@@ -225,7 +216,7 @@ async function settle(intent, signature, splits = null) {
 
     // payment receipt the client replays as X-PAYMENT to unlock the resource
     const paymentReceipt = Buffer.from(JSON.stringify({ x402Version: 1, intent, txHash: rec.txHash })).toString('base64')
-    return { success: true, payer: intent.from, transaction: receipt.hash, splits: splitTx, network: 'eip155:4663', payment: paymentReceipt }
+    return { success: true, payer: intent.from, transaction: receipt.hash, network: 'eip155:4663', payment: paymentReceipt }
   } catch (e) {
     const m = String(e.shortMessage || e.message || e)
     if (/missing revert data|CALL_EXCEPTION/i.test(m)) {
@@ -257,6 +248,61 @@ async function currentBlock() {
   return provider().send('eth_blockNumber', [])
 }
 
+/**
+ * Marketplace delivery guarantee: the buyer paid but the seller's endpoint
+ * failed — push the full amount back to the payer from the facilitator wallet.
+ * Best-effort; returns { txHash } or throws.
+ */
+async function refundPayment({ to, value, reason }) {
+  const w = settlementWallet()
+  if (!w) throw new Error('settlement wallet not configured')
+  const token = new ethers.Contract(USDG, [
+    'function transfer(address to,uint256 value) returns (bool)',
+    'function balanceOf(address) view returns (uint256)',
+  ], w)
+  const val = BigInt(value)
+  const bal = await token.balanceOf(w.address)
+  if (bal < val) throw new Error(`facilitator balance ${bal} < refund ${val}`)
+  const tx = await token.transfer(to, val)
+  const r = await tx.wait()
+  console.log('refund sent:', to, String(val), r.hash, '—', reason || '')
+  return { txHash: r.hash }
+}
+
 function settleLogAll() { return settleLog }
 
-module.exports = { verify, settle, publicView, paymentRecordFor, settleLogAll, DOMAIN, INTENT_TYPES, USDG, CHAIN_ID, DOMAIN_NAME, DOMAIN_VERSION, currentBlock }
+/**
+ * Delivery confirmed → push the deferred seller legs now (95% share).
+ * Returns the executed legs, or null when nothing was pending.
+ */
+async function finalizeSplits(txHash) {
+  const rec = settleLog.find(r => r.txHash === txHash)
+  if (!rec || !Array.isArray(rec.pendingSplits) || !rec.pendingSplits.length) return null
+  const w = settlementWallet()
+  if (!w) throw new Error('settlement wallet not configured')
+  const token = new ethers.Contract(USDG, ['function transfer(address to,uint256 value) returns (bool)'], w)
+  const done = []
+  for (const leg of rec.pendingSplits) {
+    try {
+      const t2 = await token.transfer(leg.to, leg.value)
+      const r2 = await t2.wait()
+      done.push({ to: leg.to, value: leg.value, txHash: r2.hash })
+    } catch (e) { console.error('split leg failed:', leg.to, String(e.shortMessage || e.message)) }
+  }
+  rec.splits = done
+  rec.pendingSplits = null
+  save()
+  return done
+}
+
+/** Payment refunded to the buyer → drop the pending seller legs. */
+function cancelSplits(txHash) {
+  const rec = settleLog.find(r => r.txHash === txHash)
+  if (!rec || !rec.pendingSplits) return false
+  rec.pendingSplits = null
+  rec.splitsCancelled = true
+  save()
+  return true
+}
+
+module.exports = { verify, settle, publicView, paymentRecordFor, settleLogAll, finalizeSplits, cancelSplits, DOMAIN, INTENT_TYPES, USDG, CHAIN_ID, DOMAIN_NAME, DOMAIN_VERSION, currentBlock, refundPayment }
