@@ -205,6 +205,7 @@ function catalog() {
       slug: l.slug, name: l.name, description: l.description, price: l.price,
       seller: l.seller, hits: l.hits, paid: l.paid,
       failed: l.failed || 0, refunded: l.refunded || 0,
+      reputation: reputationOf(l),
       earned: ethers.formatUnits(BigInt(l.earnedAtomic || 0), 6),
       createdAt: l.createdAt,
     }))
@@ -224,12 +225,29 @@ function recordRefund(slug, { sellerShareAtomic }) {
   l.refundedAtomic = String(BigInt(l.refundedAtomic || 0) + BigInt(sellerShareAtomic || 0))
   save()
 }
-function recordSettle(slug, { sellerShareAtomic }) {
+function recordSettle(slug, { sellerShareAtomic, latencyMs }) {
   const l = listings.get(slug)
   if (!l) return
   l.paid = (l.paid || 0) + 1
   l.earnedAtomic = String(BigInt(l.earnedAtomic || 0) + BigInt(sellerShareAtomic))
+  if (Number.isFinite(latencyMs) && latencyMs >= 0) {
+    l.latSumMs = (l.latSumMs || 0) + latencyMs
+    l.latN = (l.latN || 0) + 1
+    l.lastLatencyMs = Math.round(latencyMs)
+  }
   save()
+}
+/* Seller reputation: delivery success rate + average latency, from real
+ * paid traffic only (delivered vs refunded). No traffic yet => null (shown as NEW). */
+function reputationOf(l) {
+  const ok = l.paid || 0, bad = l.refunded || 0
+  const total = ok + bad
+  return {
+    delivered: ok, failed: bad,
+    successRate: total ? Math.round((ok / total) * 100) : null,
+    avgLatencyMs: l.latN ? Math.round(l.latSumMs / l.latN) : null,
+    score: total >= 3 ? Math.round((ok / total) * 100) : null, // needs a little history before we grade
+  }
 }
 function earningsFor(seller) {
   const mine = [...listings.values()].filter(l => l.seller.toLowerCase() === String(seller).toLowerCase())
@@ -239,6 +257,7 @@ function earningsFor(seller) {
     listings: mine.map(l => ({
       slug: l.slug, name: l.name, status: l.status, price: l.price,
       hits: l.hits, paid: l.paid, failed: l.failed || 0, refunded: l.refunded || 0,
+      reputation: reputationOf(l),
       earned: ethers.formatUnits(BigInt(l.earnedAtomic || 0), 6),
     })),
     totalPaid: mine.reduce((s, l) => s + (l.paid || 0), 0),
@@ -287,7 +306,7 @@ function fetchJson(urlStr, timeoutMs = 8000, depth = 0) {
 load()
 
 module.exports = {
-  createListing, revoke, get, catalog, recordHit, recordFail, recordRefund, recordSettle, earningsFor,
+  createListing, revoke, get, catalog, recordHit, recordFail, recordRefund, recordSettle, earningsFor, reputationOf,
   fetchJson, assertSafeUpstream, splitPrice, setReservedSlugCheck, requirement,
   DOMAIN, LISTING_TYPES, REVOKE_TYPES, FEE_BPS, listings,
 }

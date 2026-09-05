@@ -188,15 +188,17 @@ const server = http.createServer(async (req, res) => {
       // Seller earning is finalized (95% pushed on-chain) ONLY after the buyer
       // actually received the payload. If the seller's endpoint fails, the
       // buyer is refunded in full from the facilitator wallet (best-effort).
-      let payload = null, fetchErr = null
+      let payload = null, fetchErr = null, latencyMs = null
+      const t0 = Date.now()
       try { payload = await marketplace.fetchJson(mkt.upstream) } catch (e) { fetchErr = e.message }
+      latencyMs = Date.now() - t0
       let splitLegs = null, refund = null
       if (payload) {
         try { splitLegs = await facilitator.finalizeSplits(paid.txHash) }
         catch (e) { console.error('finalize splits failed', slug, e.message) }
         if (splitLegs && splitLegs.length) {
           const { sellerShare } = marketplace.splitPrice(mkt.price)
-          marketplace.recordSettle(slug, { sellerShareAtomic: sellerShare })
+          marketplace.recordSettle(slug, { sellerShareAtomic: sellerShare, latencyMs })
         }
       } else {
         marketplace.recordFail(slug)
