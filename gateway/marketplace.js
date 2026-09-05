@@ -72,6 +72,8 @@ const LISTING_TYPES = {
     { name: 'name', type: 'string' },
     { name: 'upstream', type: 'string' },
     { name: 'price', type: 'string' },
+    { name: 'planCalls', type: 'uint256' },  // Tahap 5: 0 = no subscription plan
+    { name: 'planPrice', type: 'string' },   // total USDG for planCalls (discounted)
     { name: 'validAfter', type: 'uint256' },
     { name: 'validBefore', type: 'uint256' },
     { name: 'nonce', type: 'bytes32' },
@@ -86,6 +88,19 @@ const REVOKE_TYPES = {
     { name: 'nonce', type: 'bytes32' },
   ],
 }
+// Tahap 5 — seller signs the subscription plan definition once; buyers then
+// purchase it with a normal x402 payment (no seller signature per sale).
+const SUBSCRIBE_TYPES = {
+  PlanIntent: [
+    { name: 'seller', type: 'address' },
+    { name: 'slug', type: 'string' },
+    { name: 'calls', type: 'uint256' },
+    { name: 'price', type: 'string' },
+    { name: 'validAfter', type: 'uint256' },
+    { name: 'validBefore', type: 'uint256' },
+    { name: 'nonce', type: 'bytes32' },
+  ],
+}
 
 const STORE_PATH = process.env.TRIBUTE_MARKETPLACE_STORE ||
   path.join(__dirname, 'data', 'marketplace.json')
@@ -93,6 +108,40 @@ const FEE_BPS = Math.min(2000, Math.max(0, Number(process.env.TRIBUTE_MARKETPLAC
 
 const listings = new Map()   // slug -> listing
 const usedNonces = new Set() // listing/revoke intent replay protection
+const subs = new Map() // Tahap 5 — `${slug}:${buyerLower}` -> { remaining, used, ... }
+
+function subKey(slug, buyer) { return String(slug) + ':' + String(buyer).toLowerCase() }
+function getSub(slug, buyer) { return subs.get(subKey(slug, buyer)) || null }
+function grantSub(slug, buyer, txHash) {
+  const l = listings.get(slug)
+  if (!l || !l.plan) throw new Error('listing has no subscription plan')
+  const k = subKey(slug, buyer)
+  const rec = subs.get(k) || { slug, buyer: String(buyer).toLowerCase(), planCalls: l.plan.calls,
+    planPrice: l.plan.price, atomic: l.plan.atomic, remaining: 0, used: 0, purchasedAt: Date.now() }
+  rec.remaining += l.plan.calls // stacking allowed: buy twice, get double quota
+  rec.txHash = txHash
+  subs.set(k, rec)
+  save()
+  return rec
+}
+function consumeSub(slug, buyer) {
+  const s = subs.get(subKey(slug, buyer))
+  if (!s || s.remaining <= 0) return null
+  s.remaining -= 1; s.used += 1
+  save()
+  return s
+}
+function refundSub(slug, buyer) { // upstream failed after a quota call — give the call back
+  const s = subs.get(subKey(slug, buyer))
+  if (!s) return
+  s.remaining += 1; s.used = Math.max(0, s.used - 1)
+  save()
+}
+function subsView(buyer) { // for the balance card: quota buckets this buyer owns
+  const b = String(buyer).toLowerCase()
+  return [...subs.values()].filter(s => s.buyer === b && s.remaining > 0)
+    .map(s => ({ slug: s.slug, planCalls: s.planCalls, planPrice: s.planPrice, remaining: s.remaining, used: s.used, purchasedAt: s.purchasedAt }))
+}
 
 function save() {
   try {
@@ -100,6 +149,7 @@ function save() {
     const tmp = STORE_PATH + '.tmp'
     fs.writeFileSync(tmp, JSON.stringify({
       listings: [...listings.values()],
+      subs: [...subs.values()].slice(-2000),
       nonces: [...usedNonces].slice(-500),
     }))
     fs.renameSync(tmp, STORE_PATH)
@@ -111,6 +161,7 @@ function load() {
     if (!fs.existsSync(STORE_PATH)) return
     const data = JSON.parse(fs.readFileSync(STORE_PATH, 'utf8'))
     for (const l of (data.listings || [])) if (l && l.slug) listings.set(l.slug, l)
+    for (const s of (data.subs || [])) if (s && s.slug && s.buyer) subs.set(subKey(s.slug, s.buyer), s)
     for (const n of (data.nonces || [])) usedNonces.add(n)
   } catch (e) { console.error('marketplace load failed:', e.message) }
 }
@@ -189,15 +240,29 @@ function verifyIntent(intent, signature, types, typeName) {
   return signer
 }
 
-async function createListing({ name, description, upstream, price, seller, signature, nonce, validAfter, validBefore, privateHeaders }) {
+async function createListing({ name, description, upstream, price, seller, signature, nonce, validAfter, validBefore, privateHeaders, plan, planCalls: planCallsIn, planPrice: planPriceIn }) {
   if (!name || String(name).length > 48) throw new Error('name required (max 48 chars)')
   if (description && String(description).length > 240) throw new Error('description too long (max 240)')
   if (!/^\d+(\.\d{1,6})?$/.test(String(price || ''))) throw new Error('price must be a decimal, e.g. 0.02')
   if (!/^0x[0-9a-fA-F]{40}$/.test(String(seller || ''))) throw new Error('seller must be a 0x address')
   const priv = sanitizePrivateHeaders(privateHeaders) // throws on malformed; null when absent
   const { atomic, fee, sellerShare } = splitPrice(price) // validates price
+  // Tahap 5 — optional subscription plan: N calls for a discounted total.
+  // planCalls/planPrice are part of the SIGNED ListingIntent, so the seller
+  // commits to the deal price; buyers then buy it with a normal x402 payment.
+  const planCalls = Number(plan?.calls ?? planCallsIn ?? 0)
+  const planPrice = String(plan?.price ?? planPriceIn ?? '0')
+  let planRec = null
+  if (planCalls || planPrice !== '0') {
+    if (!Number.isInteger(planCalls) || planCalls < 2 || planCalls > 1000) throw new Error('plan.calls must be an integer 2..1000')
+    if (!/^\d+(\.\d{1,6})?$/.test(planPrice)) throw new Error('plan.price must be a decimal, e.g. 0.80')
+    const planAtomic = splitPrice(planPrice).atomic
+    if (planAtomic >= atomic * BigInt(planCalls)) throw new Error(`plan must be cheaper than pay-per-call (${price} × ${planCalls})`)
+    planRec = { calls: planCalls, price: planPrice, atomic: String(planAtomic) }
+  }
   await assertSafeUpstream(String(upstream))
   verifyIntent({ seller, name: String(name), upstream: String(upstream), price: String(price),
+    planCalls: String(planRec ? planRec.calls : 0), planPrice: planRec ? planRec.price : '0',
     validAfter: validAfter || 0, validBefore, nonce }, signature, LISTING_TYPES)
   usedNonces.add(nonce)
 
@@ -224,6 +289,7 @@ async function createListing({ name, description, upstream, price, seller, signa
     earnedAtomic: '0',
     refundedAtomic: '0',
   }
+  if (planRec) rec.plan = planRec // Tahap 5: { calls, price, atomic } — signed by seller
   if (priv) rec.privateHeadersEnc = encryptHeaders(priv) // encrypted at rest; never exposed
   listings.set(slug, rec)
   save()
@@ -252,6 +318,7 @@ function catalog() {
     .sort((a, b) => (b.paid - a.paid) || (b.createdAt - a.createdAt))
     .map(l => ({
       slug: l.slug, name: l.name, description: l.description, price: l.price,
+      plan: l.plan || null, // Tahap 5: { calls, price, atomic } when offered
       seller: l.seller, hits: l.hits, paid: l.paid,
       failed: l.failed || 0, refunded: l.refunded || 0,
       reputation: reputationOf(l),
@@ -362,6 +429,7 @@ load()
 module.exports = {
   createListing, revoke, get, catalog, recordHit, recordFail, recordRefund, recordSettle, earningsFor, reputationOf,
   fetchJson, assertSafeUpstream, splitPrice, setReservedSlugCheck, requirement,
+  getSub, grantSub, consumeSub, refundSub, subsView, subs,
   privateHeadersFor: (rec) => (rec && rec.privateHeadersEnc ? decryptHeaders(rec.privateHeadersEnc) : null),
   DOMAIN, LISTING_TYPES, REVOKE_TYPES, FEE_BPS, listings,
 }

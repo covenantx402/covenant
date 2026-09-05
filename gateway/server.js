@@ -84,6 +84,11 @@ function serverSplitsFor(intent) {
     if (!mkt) return null
     const spender = (facilitator.publicView().spender || '').toLowerCase()
     if (!spender || String(intent.to).toLowerCase() !== spender) return null
+    // Tahap 5 — a plan purchase pays the discounted PLAN price, not per-call.
+    if (/\?plan=1$/.test(res) && mkt.plan) {
+      const { sellerShare } = marketplace.splitPrice(mkt.plan.price)
+      return [{ to: mkt.seller, value: sellerShare }]
+    }
     const { sellerShare } = marketplace.splitPrice(mkt.price)
     return [{ to: mkt.seller, value: sellerShare }]
   } catch { return null }
@@ -95,7 +100,7 @@ function serverSplitsFor(intent) {
  * receives the payload; on upstream failure the debit is refunded to the
  * balance instantly (the escrow never left the wallet).
  */
-async function deliverByKey(res, slug, mkt, rec, owner, priceAtomic) {
+async function deliverByKey(res, slug, mkt, rec, owner, priceAtomic, sub) {
   if (mkt) {
     let payload = null, fetchErr = null, latencyMs = null
     const t0 = Date.now()
@@ -103,27 +108,35 @@ async function deliverByKey(res, slug, mkt, rec, owner, priceAtomic) {
     latencyMs = Date.now() - t0
     let sellerTx = null
     if (payload) {
-      const { sellerShare } = marketplace.splitPrice(mkt.price)
-      try {
-        const leg = await facilitator.payout({ to: mkt.seller, value: sellerShare, reason: `balance call ${slug}` })
-        sellerTx = leg.txHash
-        marketplace.recordSettle(slug, { sellerShareAtomic: sellerShare, latencyMs })
-      } catch (e) {
-        // escrow still holds the money — give the buyer their debit back
-        balance.credit(owner.address, priceAtomic, `auto-refund ${slug}: payout failed`)
-        console.error('balance seller payout failed', slug, e.message)
-        send(res, 200, { ok: false, refunded: true, message: `Seller endpoint failed after payment — balance refunded.`, error: fetchErr || e.message })
-        return
+      if (sub) {
+        // Tahap 5 — quota call: the seller was already paid (95% of the plan
+        // price) when the subscription was bought. Just deliver + count it.
+        marketplace.recordSettle(slug, { sellerShareAtomic: 0n, latencyMs })
+      } else {
+        const { sellerShare } = marketplace.splitPrice(mkt.price)
+        try {
+          const leg = await facilitator.payout({ to: mkt.seller, value: sellerShare, reason: `balance call ${slug}` })
+          sellerTx = leg.txHash
+          marketplace.recordSettle(slug, { sellerShareAtomic: sellerShare, latencyMs })
+        } catch (e) {
+          // escrow still holds the money — give the buyer their debit back
+          balance.credit(owner.address, priceAtomic, `auto-refund ${slug}: payout failed`)
+          console.error('balance seller payout failed', slug, e.message)
+          send(res, 200, { ok: false, refunded: true, message: `Seller endpoint failed after payment — balance refunded.`, error: fetchErr || e.message })
+          return
+        }
       }
     } else {
       marketplace.recordFail(slug)
-      balance.credit(owner.address, priceAtomic, `auto-refund ${slug}: upstream failed`)
+      if (sub) marketplace.refundSub(slug, owner.address) // call goes back in the bucket
+      else balance.credit(owner.address, priceAtomic, `auto-refund ${slug}: upstream failed`)
       x402r.log('paid', { slug, path: '/api/' + slug, price: mkt.price }, { status: 200 })
       send(res, 200, {
         ok: true, access: 'granted', api: '/api/' + slug, price: mkt.price,
         marketplace: true, seller: mkt.seller, via: 'api-key', balanceCharged: false,
+        subscription: sub ? true : undefined, callsRemaining: sub ? sub.remaining : undefined,
         deliveredAt: Date.now(),
-        payload: { message: `Payment for ${mkt.name} — seller endpoint failed (${fetchErr}). Your balance was refunded.`, refunded: true },
+        payload: { message: `Payment for ${mkt.name} — seller endpoint failed (${fetchErr}). ${sub ? 'Your subscription call was refunded.' : 'Your balance was refunded.'}`, refunded: true },
       })
       return
     }
@@ -131,6 +144,7 @@ async function deliverByKey(res, slug, mkt, rec, owner, priceAtomic) {
     send(res, 200, {
       ok: true, access: 'granted', api: '/api/' + slug, price: mkt.price,
       marketplace: true, seller: mkt.seller, via: 'api-key',
+      subscription: sub ? true : undefined, callsRemaining: sub ? sub.remaining : undefined,
       balanceRemaining: ethers.formatUnits(BigInt(owner.balanceAtomic || 0), 6),
       sellerPayment: sellerTx ? { tx: sellerTx } : undefined,
       deliveredAt: Date.now(), payload,
@@ -227,20 +241,27 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.startsWith('/x402/api/')) {
     const slug = url.slice('/x402/api/'.length).split('/')[0]
+    const wantPlan = /[?&]plan=1/.test(req.url) // Tahap 5: buy an N-call subscription
     let rec = x402r.get(slug)
     const mkt = rec ? null : marketplace.get(slug)
     if (!rec && !mkt) { send(res, 404, { error: 'unknown api' }); return }
-    const resource = 'https://tribute.re/x402/api/' + slug
+    const resource = 'https://tribute.re/x402/api/' + slug + (wantPlan ? '?plan=1' : '')
     // ---- API-key path (prepaid balance): no per-call wallet signature ----
     const apiKey = req.headers['x-api-key']
     if (apiKey) {
+      if (wantPlan) { send(res, 400, { error: 'subscription purchase requires a wallet payment (X-PAYMENT), not an API-key debit' }); return }
       const owner = balance.ownerByKey(String(apiKey))
       if (!owner) { send(res, 401, { error: 'invalid api key' }); return }
+      // Tahap 5 — a purchased subscription is spent BEFORE any balance debit.
+      const sub = mkt && !wantPlan ? marketplace.consumeSub(slug, owner.address) : null
       const priceAtomic = x402r.priceToAtomic((mkt || rec).price)
-      const d = balance.debit(owner.address, priceAtomic, 'call /api/' + slug)
-      if (!d.ok) { send(res, 402, { error: 'insufficient balance', balance: ethers.formatUnits(BigInt(owner.balanceAtomic || 0), 6), topUp: '/x402/balance/topup' }); return }
+      let debitAmt = BigInt(priceAtomic)
+      if (!sub) {
+        const d = balance.debit(owner.address, priceAtomic, 'call /api/' + slug)
+        if (!d.ok) { send(res, 402, { error: 'insufficient balance', balance: ethers.formatUnits(BigInt(owner.balanceAtomic || 0), 6), topUp: '/x402/balance/topup' }); return }
+      }
       balance.touchKey(owner.address, String(apiKey))
-      await deliverByKey(res, slug, mkt, rec, owner, BigInt(priceAtomic))
+      await deliverByKey(res, slug, mkt, rec, owner, sub ? 0n : debitAmt, sub)
       return
     }
     const paid = facilitator.paymentRecordFor(req.headers['x-payment'], resource)
@@ -248,6 +269,13 @@ const server = http.createServer(async (req, res) => {
       // marketplace listing: build the challenge from the listing record
       marketplace.recordHit(slug)
       const reqt = marketplace.requirement(mkt, resource, facilitator.publicView().spender)
+      if (wantPlan) {
+        // Tahap 5 — subscription purchase: the challenge carries the PLAN price.
+        if (!mkt.plan) { send(res, 400, { error: 'this API has no subscription plan' }); return }
+        reqt.maxAmountRequired = mkt.plan.atomic
+        reqt.description = `${mkt.name} — ${mkt.plan.calls} calls for ${mkt.plan.price} USDG (subscription)`
+        reqt.extra = { ...reqt.extra, plan: true, planCalls: mkt.plan.calls, planPrice: mkt.plan.price }
+      }
       send(res, 402, { x402Version: 1, error: 'PAYMENT_REQUIRED', accepts: [reqt] })
       return
     }
@@ -259,6 +287,28 @@ const server = http.createServer(async (req, res) => {
       return
     }
     // settled on-chain (nonce anchored to a tx) → deliver the REAL resource.
+    if (mkt && wantPlan) {
+      // Tahap 5 — plan purchase: payment already settled at the discounted
+      // price. Finalize the seller leg, grant the quota, no upstream fetch.
+      if (!mkt.plan) { send(res, 400, { error: 'this API has no subscription plan' }); return }
+      let splitLegs = null
+      try { splitLegs = await facilitator.finalizeSplits(paid.txHash) }
+      catch (e) { console.error('finalize plan splits failed', slug, e.message) }
+      if (splitLegs && splitLegs.length) {
+        const { sellerShare } = marketplace.splitPrice(mkt.plan.price)
+        marketplace.recordSettle(slug, { sellerShareAtomic: sellerShare, latencyMs: 0 })
+      }
+      const s = marketplace.grantSub(slug, paid.from, paid.txHash)
+      x402r.log('paid', { slug, path: '/api/' + slug, price: mkt.plan.price, plan: true }, { status: 200 })
+      send(res, 200, {
+        ok: true, access: 'granted', api: '/api/' + slug, marketplace: true, seller: mkt.seller,
+        subscription: true, planCalls: s.planCalls, planPrice: s.planPrice,
+        callsRemaining: s.remaining, tx: paid.txHash, payer: paid.from,
+        sellerPayment: splitLegs && splitLegs[0] ? { tx: splitLegs[0].txHash } : undefined,
+        payload: { message: `${s.planCalls} calls granted for ${mkt.name}. Use your API key or X-PAYMENT receipts — remaining: ${s.remaining}.` },
+      })
+      return
+    }
     if (mkt) {
       // marketplace listing: proxy the seller's upstream JSON.
       // Seller earning is finalized (95% pushed on-chain) ONLY after the buyer
@@ -686,7 +736,9 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.startsWith('/x402/balance')) {
     const buyer = new URL(req.url, 'http://x').searchParams.get('buyer') || ''
     if (!/^0x[0-9a-fA-F]{40}$/.test(buyer)) { send(res, 400, { error: 'buyer=0x… required' }); return }
-    send(res, 200, { ok: true, ...balance.view(buyer) })
+    // Tahap 5 — include purchased subscriptions (quota buckets) for this buyer.
+    const subs = marketplace.subsView(buyer)
+    send(res, 200, { ok: true, ...balance.view(buyer), subs })
     return
   }
 
