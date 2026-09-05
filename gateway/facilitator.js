@@ -150,9 +150,12 @@ async function verify(intent, signature) {
 
 /**
  * Execute on-chain settlement: transferFrom(payer, payTo, value).
+ * Optional `splits`: after the pull, the facilitator wallet pushes each
+ * { to, value } leg (marketplace fee split). Legs are best-effort — a failed
+ * leg never voids the buyer's payment; it is logged and retried manually.
  * Returns { success, transaction?, errorReason?, payer? }.
  */
-async function settle(intent, signature) {
+async function settle(intent, signature, splits = null) {
   const v = await verify(intent, signature)
   if (!v.ok) return { success: false, errorReason: v.reason, payer: v.payer || null }
 
@@ -161,6 +164,7 @@ async function settle(intent, signature) {
 
   const token = new ethers.Contract(USDG, [
     'function transferFrom(address from,address to,uint256 value) returns (bool)',
+    'function transfer(address to,uint256 value) returns (bool)',
     'function balanceOf(address) view returns (uint256)',
     'function allowance(address,address) view returns (uint256)',
   ], w)
@@ -194,9 +198,34 @@ async function settle(intent, signature) {
     settleLog.unshift(rec)
     if (settleLog.length > 100) settleLog.length = 100
     save()
+
+    // Marketplace fee split: the full pull already landed on the facilitator
+    // wallet (intent.to). Push the seller leg from there; the fee leg stays.
+    // Best-effort — a failed leg never voids the buyer's payment.
+    let splitTx = null
+    if (Array.isArray(splits) && splits.length) {
+      const total = splits.reduce((s, x) => s + BigInt(x.value), 0n)
+      if (total <= BigInt(intent.value)) {
+        for (const leg of splits) {
+          try {
+            const t2 = await token.transfer(leg.to, leg.value)
+            const r2 = await t2.wait()
+            splitTx = splitTx || []
+            splitTx.push({ to: leg.to, value: String(leg.value), txHash: r2.hash })
+          } catch (e) {
+            console.error('split leg failed:', leg.to, String(e.shortMessage || e.message))
+          }
+        }
+        rec.splits = splitTx || null
+        save()
+      } else {
+        console.error('settle: split total exceeds payment — skipping legs', String(total), '>', String(intent.value))
+      }
+    }
+
     // payment receipt the client replays as X-PAYMENT to unlock the resource
     const paymentReceipt = Buffer.from(JSON.stringify({ x402Version: 1, intent, txHash: rec.txHash })).toString('base64')
-    return { success: true, payer: intent.from, transaction: receipt.hash, network: 'eip155:4663', payment: paymentReceipt }
+    return { success: true, payer: intent.from, transaction: receipt.hash, splits: splitTx, network: 'eip155:4663', payment: paymentReceipt }
   } catch (e) {
     const m = String(e.shortMessage || e.message || e)
     if (/missing revert data|CALL_EXCEPTION/i.test(m)) {

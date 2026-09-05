@@ -47,6 +47,10 @@ function get(slug) {
   return routes.get(slug) || null
 }
 
+function has(slug) {
+  return routes.has(slug)
+}
+
 function save() {
   try {
     fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true })
@@ -139,4 +143,4 @@ function seed() {
 load()
 seed()
 
-module.exports = { list, get, create, requirement, USDG, activity, hits, bump, log }
+module.exports = { list, get, has, create, requirement, USDG, activity, hits, bump, log }

@@ -9,10 +9,15 @@ const vault = require('./agent-vault')
 const wallets = require('./wallets')
 const keys = require('./keys')
 const facilitator = require('./facilitator')
+const marketplace = require('./marketplace')
+const { ethers } = require('ethers')
 const { DOMAIN_NAME, DOMAIN_VERSION } = require('./facilitator')
 const ratelimit = require('./ratelimit')
 const sessions = require('./sessions')
 const reputation = require('./reputation')
+
+// marketplace slugs must never collide with TRIBUTE's own paid routes
+marketplace.setReservedSlugCheck((slug) => x402r.has(slug))
 
 const UPSTREAM = process.env.TRIBUTE_RPC_UPSTREAM
 const PORT = Number(process.env.TRIBUTE_PORT || 8792)
@@ -63,6 +68,24 @@ function authKey(req) {
 function send(res, code, obj) {
   res.statusCode = code
   res.end(JSON.stringify(obj))
+}
+
+/* Marketplace fee split, derived SERVER-SIDE from the payment intent's
+   resource — the client never dictates legs. If the paid resource maps to an
+   active listing, push the seller's share; the fee stays in the facilitator
+   wallet. Guard: intent.to must be the facilitator wallet itself. */
+function serverSplitsFor(intent) {
+  try {
+    const res = String(intent?.resource || '')
+    if (!res.includes('/x402/api/')) return null
+    const slug = res.split('/x402/api/')[1].split(/[/?#]/)[0]
+    const mkt = marketplace.get(slug)
+    if (!mkt) return null
+    const spender = (facilitator.publicView().spender || '').toLowerCase()
+    if (!spender || String(intent.to).toLowerCase() !== spender) return null
+    const { sellerShare } = marketplace.splitPrice(mkt.price)
+    return [{ to: mkt.seller, value: sellerShare }]
+  } catch { return null }
 }
 
 function readBody(req, cb) {
@@ -140,10 +163,18 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.startsWith('/x402/api/')) {
     const slug = url.slice('/x402/api/'.length).split('/')[0]
-    const rec = x402r.get(slug)
-    if (!rec) { send(res, 404, { error: 'unknown api' }); return }
+    let rec = x402r.get(slug)
+    const mkt = rec ? null : marketplace.get(slug)
+    if (!rec && !mkt) { send(res, 404, { error: 'unknown api' }); return }
     const resource = 'https://tribute.re/x402/api/' + slug
     const paid = facilitator.paymentRecordFor(req.headers['x-payment'], resource)
+    if (!paid && !rec) {
+      // marketplace listing: build the challenge from the listing record
+      marketplace.recordHit(slug)
+      const reqt = marketplace.requirement(mkt, resource, facilitator.publicView().spender)
+      send(res, 402, { x402Version: 1, error: 'PAYMENT_REQUIRED', accepts: [reqt] })
+      return
+    }
     if (!paid) {
       x402r.bump(slug)
       const reqt = x402r.requirement(rec, resource)
@@ -152,8 +183,27 @@ const server = http.createServer(async (req, res) => {
       return
     }
     // settled on-chain (nonce anchored to a tx) → deliver the REAL resource.
-    // payloadFor() hits live feeds (RSS / GeckoTerminal) with a 60s cache.
-    // If upstream is down we still honour the payment receipt — but say so.
+    if (mkt) {
+      // marketplace listing: proxy the seller's upstream JSON, credit earnings
+      let payload = null
+      try { payload = await marketplace.fetchJson(mkt.upstream) } catch (e) {
+        console.error('marketplace upstream fetch failed for', slug, e.message)
+      }
+      x402r.log('paid', { slug, path: '/api/' + slug, price: mkt.price }, { status: 200 })
+      send(res, 200, {
+        ok: true, access: 'granted', api: '/api/' + slug, price: mkt.price,
+        marketplace: true, seller: mkt.seller,
+        tx: paid.txHash, payer: paid.from, deliveredAt: Date.now(),
+        payload: payload || {
+          message: `Payment confirmed for ${mkt.name} — seller endpoint temporarily unavailable, retry shortly`,
+          tx: paid.txHash, receiptOnly: true,
+        },
+      })
+      return
+    }
+    // TRIBUTE's own route: payloadFor() hits live feeds (RSS / GeckoTerminal)
+    // with a 60s cache. If upstream is down we still honour the payment
+    // receipt — but say so.
     let payload = null
     try { payload = await dataProviders.payloadFor(rec.slug) } catch (e) {
       console.error('payload fetch failed for', rec.slug, e.message)
@@ -243,7 +293,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && url === '/facilitator/settle') {
     readBody(req, (err, payload) => {
       if (err) { send(res, 400, { error: 'bad json' }); return }
-      facilitator.settle(payload.intent, payload.signature).then(v => {
+      facilitator.settle(payload.intent, payload.signature, serverSplitsFor(payload.intent)).then(v => {
         vault.audit(v.success ? 'settle-ok' : 'settle-fail', v.payer || null, { tx: v.transaction || v.errorReason })
         let out = v
         if (v.success) {
@@ -253,6 +303,20 @@ const server = http.createServer(async (req, res) => {
             txHash: v.transaction,
           })
           const extra = payload.extra || {}
+          // marketplace accounting: credit the seller only for legs that
+          // actually landed on-chain (see serverSplitsFor / facilitator.settle)
+          if (v.success && Array.isArray(v.splits)) {
+            const res = String(payload.intent?.resource || '')
+            if (res.includes('/x402/api/')) {
+              const mslug = res.split('/x402/api/')[1].split(/[/?#]/)[0]
+              for (const leg of v.splits) {
+                const mkt = marketplace.get(mslug)
+                if (mkt && leg.to && leg.to.toLowerCase() === mkt.seller.toLowerCase()) {
+                  marketplace.recordSettle(mslug, { sellerShareAtomic: leg.value })
+                }
+              }
+            }
+          }
           if (String(payload.intent?.resource) === 'session' || extra.session) {
             const s = sessions.open({
               payer: v.payer,
@@ -414,6 +478,47 @@ const server = http.createServer(async (req, res) => {
       .slice(0, 20)
     const routes = [...byRoute.values()].sort((a, b) => b.count - a.count)
     send(res, 200, { payers, routes, totalPayers: byPayer.size, totalSettled: log.length })
+    return
+  }
+
+  // ---- marketplace: third-party paid APIs (list / browse / revoke / earnings)
+  if (req.method === 'GET' && url === '/x402/marketplace') {
+    send(res, 200, { ok: true, feeBps: marketplace.FEE_BPS, apis: marketplace.catalog() })
+    return
+  }
+  if (req.method === 'GET' && url === '/x402/marketplace/earnings') {
+    const seller = new URL(req.url, 'http://x').searchParams.get('seller')
+    if (!/^0x[0-9a-fA-F]{40}$/.test(seller || '')) { send(res, 400, { error: 'seller=0x… required' }); return }
+    send(res, 200, { ok: true, ...marketplace.earningsFor(seller) })
+    return
+  }
+  if (req.method === 'POST' && url === '/x402/marketplace/list') {
+    readBody(req, async (err, payload) => {
+      if (err) { send(res, 400, { error: 'bad json' }); return }
+      try {
+        const { rec, split } = await marketplace.createListing(payload || {})
+        x402r.log('create', { slug: rec.slug, path: '/api/' + rec.slug, price: rec.price }, { status: 201 })
+        send(res, 201, {
+          ok: true, api: { slug: rec.slug, name: rec.name, price: rec.price, seller: rec.seller },
+          endpoint: '/x402/api/' + rec.slug,
+          economics: { priceUsdg: rec.price, feeUsdg: ethers.formatUnits(BigInt(split.fee), 6), sellerUsdg: ethers.formatUnits(BigInt(split.sellerShare), 6) },
+        })
+      } catch (e) {
+        send(res, 400, { error: String(e.message || e) })
+      }
+    })
+    return
+  }
+  if (req.method === 'POST' && url === '/x402/marketplace/revoke') {
+    readBody(req, (err, payload) => {
+      if (err) { send(res, 400, { error: 'bad json' }); return }
+      try {
+        const rec = marketplace.revoke(payload || {})
+        send(res, 200, { ok: true, slug: rec.slug, status: rec.status })
+      } catch (e) {
+        send(res, 400, { error: String(e.message || e) })
+      }
+    })
     return
   }
 
