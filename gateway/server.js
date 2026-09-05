@@ -10,6 +10,7 @@ const wallets = require('./wallets')
 const keys = require('./keys')
 const facilitator = require('./facilitator')
 const marketplace = require('./marketplace')
+const balance = require('./balance')
 const { ethers } = require('ethers')
 const { DOMAIN_NAME, DOMAIN_VERSION } = require('./facilitator')
 const ratelimit = require('./ratelimit')
@@ -86,6 +87,69 @@ function serverSplitsFor(intent) {
     const { sellerShare } = marketplace.splitPrice(mkt.price)
     return [{ to: mkt.seller, value: sellerShare }]
   } catch { return null }
+}
+
+/**
+ * Deliver a paid API response for the API-key (prepaid balance) path.
+ * Marketplace listings: pay the seller's 95% leg from escrow AFTER the buyer
+ * receives the payload; on upstream failure the debit is refunded to the
+ * balance instantly (the escrow never left the wallet).
+ */
+async function deliverByKey(res, slug, mkt, rec, owner, priceAtomic) {
+  if (mkt) {
+    let payload = null, fetchErr = null, latencyMs = null
+    const t0 = Date.now()
+    try { payload = await marketplace.fetchJson(mkt.upstream) } catch (e) { fetchErr = e.message }
+    latencyMs = Date.now() - t0
+    let sellerTx = null
+    if (payload) {
+      const { sellerShare } = marketplace.splitPrice(mkt.price)
+      try {
+        const leg = await facilitator.payout({ to: mkt.seller, value: sellerShare, reason: `balance call ${slug}` })
+        sellerTx = leg.txHash
+        marketplace.recordSettle(slug, { sellerShareAtomic: sellerShare, latencyMs })
+      } catch (e) {
+        // escrow still holds the money — give the buyer their debit back
+        balance.credit(owner.address, priceAtomic, `auto-refund ${slug}: payout failed`)
+        console.error('balance seller payout failed', slug, e.message)
+        send(res, 200, { ok: false, refunded: true, message: `Seller endpoint failed after payment — balance refunded.`, error: fetchErr || e.message })
+        return
+      }
+    } else {
+      marketplace.recordFail(slug)
+      balance.credit(owner.address, priceAtomic, `auto-refund ${slug}: upstream failed`)
+      x402r.log('paid', { slug, path: '/api/' + slug, price: mkt.price }, { status: 200 })
+      send(res, 200, {
+        ok: true, access: 'granted', api: '/api/' + slug, price: mkt.price,
+        marketplace: true, seller: mkt.seller, via: 'api-key', balanceCharged: false,
+        deliveredAt: Date.now(),
+        payload: { message: `Payment for ${mkt.name} — seller endpoint failed (${fetchErr}). Your balance was refunded.`, refunded: true },
+      })
+      return
+    }
+    x402r.log('paid', { slug, path: '/api/' + slug, price: mkt.price }, { status: 200 })
+    send(res, 200, {
+      ok: true, access: 'granted', api: '/api/' + slug, price: mkt.price,
+      marketplace: true, seller: mkt.seller, via: 'api-key',
+      balanceRemaining: ethers.formatUnits(BigInt(owner.balanceAtomic || 0), 6),
+      sellerPayment: sellerTx ? { tx: sellerTx } : undefined,
+      deliveredAt: Date.now(), payload,
+    })
+    return
+  }
+  // TRIBUTE's own route, paid from balance
+  let payload = null
+  try { payload = await dataProviders.payloadFor(rec.slug) } catch (e) {
+    console.error('payload fetch failed for', rec.slug, e.message)
+    balance.credit(owner.address, priceAtomic, `auto-refund ${rec.slug}: feed failed`)
+  }
+  x402r.log('paid', rec, { status: 200 })
+  send(res, 200, {
+    ok: true, access: 'granted', api: rec.path, price: rec.price, via: 'api-key',
+    balanceRemaining: payload ? ethers.formatUnits(BigInt(owner.balanceAtomic || 0), 6) : undefined,
+    deliveredAt: Date.now(),
+    payload: payload || { message: `Payment for ${rec.path} — upstream feed temporarily unavailable, retry shortly`, refunded: !payload ? true : undefined },
+  })
 }
 
 function readBody(req, cb) {
@@ -167,6 +231,18 @@ const server = http.createServer(async (req, res) => {
     const mkt = rec ? null : marketplace.get(slug)
     if (!rec && !mkt) { send(res, 404, { error: 'unknown api' }); return }
     const resource = 'https://tribute.re/x402/api/' + slug
+    // ---- API-key path (prepaid balance): no per-call wallet signature ----
+    const apiKey = req.headers['x-api-key']
+    if (apiKey) {
+      const owner = balance.ownerByKey(String(apiKey))
+      if (!owner) { send(res, 401, { error: 'invalid api key' }); return }
+      const priceAtomic = x402r.priceToAtomic((mkt || rec).price)
+      const d = balance.debit(owner.address, priceAtomic, 'call /api/' + slug)
+      if (!d.ok) { send(res, 402, { error: 'insufficient balance', balance: ethers.formatUnits(BigInt(owner.balanceAtomic || 0), 6), topUp: '/x402/balance/topup' }); return }
+      balance.touchKey(owner.address, String(apiKey))
+      await deliverByKey(res, slug, mkt, rec, owner, BigInt(priceAtomic))
+      return
+    }
     const paid = facilitator.paymentRecordFor(req.headers['x-payment'], resource)
     if (!paid && !rec) {
       // marketplace listing: build the challenge from the listing record
@@ -527,6 +603,90 @@ const server = http.createServer(async (req, res) => {
         send(res, 400, { error: String(e.message || e) })
       }
     })
+    return
+  }
+
+  // ---- prepaid balances (Tahap 3): top up once, call with an API key ----
+  // 1) challenge: what to sign/pay to top up
+  if (req.method === 'GET' && url === '/x402/balance/topup') {
+    const u = new URL(req.url, 'http://x')
+    const buyer = u.searchParams.get('buyer') || ''
+    const amount = u.searchParams.get('amount') || '5'
+    if (!/^0x[0-9a-fA-F]{40}$/.test(buyer)) { send(res, 400, { error: 'buyer=0x… required' }); return }
+    if (!/^\d+(\.\d{1,6})?$/.test(amount) || Number(amount) <= 0 || Number(amount) > 1000) { send(res, 400, { error: 'amount must be 0.000001 … 1000' }); return }
+    send(res, 402, {
+      x402Version: 1, error: 'PAYMENT_REQUIRED',
+      accepts: [{
+        scheme: 'exact', network: 'eip155:4663',
+        maxAmountRequired: String(x402r.priceToAtomic(amount)),
+        resource: 'https://tribute.re/x402/balance/topup',
+        description: `TRIBUTE balance top-up ${amount} USDG for ${buyer}`,
+        mimeType: 'application/json',
+        payTo: facilitator.publicView().spender,
+        maxTimeoutSeconds: 60, asset: x402r.USDG,
+        extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION, topup: true, buyer, amount },
+      }],
+    })
+    return
+  }
+  // 2) redeem a settled top-up receipt → credit the ledger
+  if (req.method === 'POST' && url === '/x402/balance/redeem') {
+    readBody(req, (err, payload) => {
+      if (err) { send(res, 400, { error: 'bad json' }); return }
+      const paid = facilitator.paymentRecordFor(payload['x-payment'] || payload.xPayment, 'https://tribute.re/x402/balance/topup')
+      if (!paid) { send(res, 402, { error: 'PAYMENT_REQUIRED', reason: 'settle the top-up intent first (POST /facilitator/settle), then redeem its receipt' }); return }
+      if (!facilitator.claimReceipt(paid.nonce)) { send(res, 409, { error: 'receipt already redeemed' }); return }
+      const r = balance.credit(paid.from, paid.value, `top-up ${ethers.formatUnits(BigInt(paid.value), 6)} USDG`)
+      if (!r.ok) { send(res, 400, { error: r.error }); return }
+      send(res, 200, { ok: true, buyer: paid.from, credited: ethers.formatUnits(BigInt(paid.value), 6), balance: ethers.formatUnits(BigInt(r.balanceAtomic), 6), tx: paid.txHash })
+    })
+    return
+  }
+  // 3) create an API key (one signature per key, then zero signatures per call)
+  if (req.method === 'POST' && url === '/x402/balance/keys') {
+    readBody(req, (err, payload) => {
+      if (err) { send(res, 400, { error: 'bad json' }); return }
+      const v = balance.verifyKeyIntent(payload.intent, payload.signature, facilitator.DOMAIN)
+      if (!v.ok) { send(res, 401, { error: v.reason }); return }
+      if (!facilitator.claimNonce(payload.intent.nonce)) { send(res, 409, { error: 'nonce already used' }); return }
+      const k = balance.createKey(v.buyer)
+      send(res, 201, { ok: true, key: k.key, buyer: k.address, note: 'Store it now — shown once. Use header: X-API-KEY' })
+    })
+    return
+  }
+  // 4) key list (metadata only, never the secrets)
+  if (req.method === 'GET' && url.startsWith('/x402/balance/keys')) {
+    const buyer = new URL(req.url, 'http://x').searchParams.get('buyer') || ''
+    if (!/^0x[0-9a-fA-F]{40}$/.test(buyer)) { send(res, 400, { error: 'buyer=0x… required' }); return }
+    send(res, 200, { ok: true, keys: balance.listKeys(buyer) })
+    return
+  }
+  // 5) withdraw escrow back to the owner's wallet (owner-signed, replay-safe)
+  if (req.method === 'POST' && url === '/x402/balance/withdraw') {
+    readBody(req, async (err, payload) => {
+      if (err) { send(res, 400, { error: 'bad json' }); return }
+      const intent = payload.intent || {}
+      const v = balance.verifyWithdraw(intent, payload.signature, facilitator.DOMAIN)
+      if (!v.ok) { send(res, 401, { error: v.reason }); return }
+      if (!facilitator.claimNonce(intent.nonce)) { send(res, 409, { error: 'nonce already used' }); return }
+      try {
+        const d = balance.debit(v.buyer, v.amount, 'withdrawal')
+        if (!d.ok) { facilitator.releaseNonce(intent.nonce); send(res, 400, { error: d.error }); return }
+        const tx = await facilitator.payout({ to: v.buyer, value: v.amount, reason: 'balance withdrawal' })
+        send(res, 200, { ok: true, buyer: v.buyer, amount: ethers.formatUnits(v.amount, 6), tx: tx.txHash, balance: ethers.formatUnits(BigInt(d.balanceAtomic), 6) })
+      } catch (e) {
+        balance.credit(v.buyer, v.amount, 'withdrawal failed, restored')
+        facilitator.releaseNonce(intent.nonce)
+        send(res, 502, { error: 'payout failed: ' + e.message })
+      }
+    })
+    return
+  }
+  // 6) balance view (public per-address, like earnings)
+  if (req.method === 'GET' && url.startsWith('/x402/balance')) {
+    const buyer = new URL(req.url, 'http://x').searchParams.get('buyer') || ''
+    if (!/^0x[0-9a-fA-F]{40}$/.test(buyer)) { send(res, 400, { error: 'buyer=0x… required' }); return }
+    send(res, 200, { ok: true, ...balance.view(buyer) })
     return
   }
 

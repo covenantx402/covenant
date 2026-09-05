@@ -238,8 +238,21 @@ function paymentRecordFor(header, resource) {
     const rec = usedNonces.get(intent.nonce)
     if (!rec) return null
     if (resource && intent.resource && intent.resource !== resource) return null
-    return { txHash: rec.txHash, from: rec.from, value: rec.value }
+    return { txHash: rec.txHash, from: rec.from, value: rec.value, nonce: intent.nonce }
   } catch { return null }
+}
+
+/**
+ * One-time claim on a settled receipt (balance top-up redemption).
+ * Returns true the first time for a given nonce, false on replay — so the
+ * same X-PAYMENT header can never credit the ledger twice.
+ */
+function claimReceipt(nonce) {
+  const rec = usedNonces.get(nonce)
+  if (!rec || rec.redeemed) return false
+  rec.redeemed = true
+  save()
+  return true
 }
 
 
@@ -270,6 +283,30 @@ async function refundPayment({ to, value, reason }) {
 }
 
 function settleLogAll() { return settleLog }
+
+/**
+ * Pay an arbitrary recipient from the facilitator (escrow) wallet — used for
+ * balance-funded seller legs and withdrawals. Same mechanics as refundPayment.
+ */
+async function payout({ to, value, reason }) {
+  return refundPayment({ to, value, reason })
+}
+
+/**
+ * Claim a nonce for a non-payment signed action (withdrawals, key creation).
+ * Returns true when the nonce was unseen (and records it), false on replay.
+ */
+function claimNonce(nonce) {
+  const k = 'act:' + String(nonce)
+  if (usedNonces.has(k)) return false
+  usedNonces.set(k, { txHash: null, t: Date.now(), from: null, value: '0' })
+  save()
+  return true
+}
+function releaseNonce(nonce) {
+  const k = 'act:' + String(nonce)
+  if (usedNonces.delete(k)) save()
+}
 
 /**
  * Delivery confirmed → push the deferred seller legs now (95% share).
@@ -305,4 +342,4 @@ function cancelSplits(txHash) {
   return true
 }
 
-module.exports = { verify, settle, publicView, paymentRecordFor, settleLogAll, finalizeSplits, cancelSplits, DOMAIN, INTENT_TYPES, USDG, CHAIN_ID, DOMAIN_NAME, DOMAIN_VERSION, currentBlock, refundPayment }
+module.exports = { verify, settle, publicView, paymentRecordFor, claimReceipt, settleLogAll, finalizeSplits, cancelSplits, DOMAIN, INTENT_TYPES, USDG, CHAIN_ID, DOMAIN_NAME, DOMAIN_VERSION, currentBlock, refundPayment, payout, claimNonce, releaseNonce }

@@ -143,4 +143,4 @@ function seed() {
 load()
 seed()
 
-module.exports = { list, get, has, create, requirement, USDG, activity, hits, bump, log }
+module.exports = { list, get, has, create, requirement, USDG, activity, hits, bump, log, priceToAtomic }
