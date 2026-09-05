@@ -99,7 +99,7 @@ async function deliverByKey(res, slug, mkt, rec, owner, priceAtomic) {
   if (mkt) {
     let payload = null, fetchErr = null, latencyMs = null
     const t0 = Date.now()
-    try { payload = await marketplace.fetchJson(mkt.upstream) } catch (e) { fetchErr = e.message }
+    try { payload = await marketplace.fetchJson(mkt.upstream, 8000, 0, marketplace.privateHeadersFor(mkt) || undefined) } catch (e) { fetchErr = e.message }
     latencyMs = Date.now() - t0
     let sellerTx = null
     if (payload) {
@@ -266,7 +266,7 @@ const server = http.createServer(async (req, res) => {
       // buyer is refunded in full from the facilitator wallet (best-effort).
       let payload = null, fetchErr = null, latencyMs = null
       const t0 = Date.now()
-      try { payload = await marketplace.fetchJson(mkt.upstream) } catch (e) { fetchErr = e.message }
+      try { payload = await marketplace.fetchJson(mkt.upstream, 8000, 0, marketplace.privateHeadersFor(mkt) || undefined) } catch (e) { fetchErr = e.message }
       latencyMs = Date.now() - t0
       let splitLegs = null, refund = null
       if (payload) {

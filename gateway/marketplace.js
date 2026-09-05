@@ -14,12 +14,58 @@ const path = require('path')
 const dns = require('dns')
 const http = require('http')
 const https = require('https')
+const crypto = require('crypto')
 const { URL } = require('url')
 const { ethers } = require('ethers')
 
 const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'
 const CHAIN_ID = 4663
 const DOMAIN = { name: 'TRIBUTE', version: '1', chainId: CHAIN_ID, verifyingContract: USDG }
+
+/* ---------- private upstream headers (Tahap 4) ----------
+ * Sellers whose upstream needs auth (e.g. an OpenAI key behind it) attach
+ * request headers at listing time. They are AES-256-GCM encrypted with a
+ * server key before being written to the store — plaintext never hits disk,
+ * never appears in the catalog, and are only ever injected into the seller's
+ * own upstream request at delivery time. */
+function headerKey() {
+  const raw = process.env.TRIBUTE_MARKETPLACE_HEADER_KEY ||
+    crypto.createHash('sha256').update('tribute-marketplace-headers:' + (process.env.TRIBUTE_VAULT_KEY || process.env.TRIBUTE_RPC_UPSTREAM || 'tribute-local')).digest()
+  return crypto.createHash('sha256').update(raw).digest()
+}
+function encryptHeaders(obj) {
+  const iv = crypto.randomBytes(12)
+  const cipher = crypto.createCipheriv('aes-256-gcm', headerKey(), iv)
+  const enc = Buffer.concat([cipher.update(JSON.stringify(obj), 'utf8'), cipher.final()])
+  return { v: 1, enc: enc.toString('base64'), iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64') }
+}
+function decryptHeaders(blob) {
+  if (!blob || !blob.enc) return null
+  try {
+    const d = crypto.createDecipheriv('aes-256-gcm', headerKey(), Buffer.from(blob.iv, 'base64'))
+    d.setAuthTag(Buffer.from(blob.tag, 'base64'))
+    return JSON.parse(Buffer.concat([d.update(Buffer.from(blob.enc, 'base64')), d.final()]).toString('utf8'))
+  } catch { return null }
+}
+const HEADER_NAME_RE = /^[A-Za-z0-9-]{1,48}$/
+function sanitizePrivateHeaders(raw) {
+  if (raw == null || raw === '') return null
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error('privateHeaders must be an object of header: value')
+  const keys = Object.keys(raw)
+  if (keys.length === 0) return null
+  if (keys.length > 8) throw new Error('too many private headers (max 8)')
+  const out = {}
+  for (const k of keys) {
+    if (!HEADER_NAME_RE.test(k)) throw new Error(`bad header name: ${k}`)
+    const lk = k.toLowerCase()
+    if (['host', 'content-length', 'connection', 'x-payment', 'x-api-key', 'cookie', 'set-cookie'].includes(lk))
+      throw new Error(`header not allowed: ${k}`)
+    const v = String(raw[k])
+    if (!v || v.length > 512 || /[\r\n]/.test(v)) throw new Error(`bad value for header ${k}`)
+    out[k] = v
+  }
+  return out
+}
 const LISTING_TYPES = {
   ListingIntent: [
     { name: 'seller', type: 'address' },
@@ -143,11 +189,12 @@ function verifyIntent(intent, signature, types, typeName) {
   return signer
 }
 
-async function createListing({ name, description, upstream, price, seller, signature, nonce, validAfter, validBefore }) {
+async function createListing({ name, description, upstream, price, seller, signature, nonce, validAfter, validBefore, privateHeaders }) {
   if (!name || String(name).length > 48) throw new Error('name required (max 48 chars)')
   if (description && String(description).length > 240) throw new Error('description too long (max 240)')
   if (!/^\d+(\.\d{1,6})?$/.test(String(price || ''))) throw new Error('price must be a decimal, e.g. 0.02')
   if (!/^0x[0-9a-fA-F]{40}$/.test(String(seller || ''))) throw new Error('seller must be a 0x address')
+  const priv = sanitizePrivateHeaders(privateHeaders) // throws on malformed; null when absent
   const { atomic, fee, sellerShare } = splitPrice(price) // validates price
   await assertSafeUpstream(String(upstream))
   verifyIntent({ seller, name: String(name), upstream: String(upstream), price: String(price),
@@ -157,7 +204,8 @@ async function createListing({ name, description, upstream, price, seller, signa
   const slug = uniqueSlug(slugify(name))
   // Phase-1 guard: probe the seller's endpoint once. A listing that can't
   // answer with JSON today would only produce refunds later — reject it now.
-  try { await fetchJson(String(upstream), 8000) }
+  // Phase-4: the probe carries the seller's private headers, same as delivery.
+  try { await fetchJson(String(upstream), 8000, 0, priv || undefined) }
   catch (e) { throw new Error(`upstream test failed — endpoint must answer GET with JSON (200): ${e.message}`) }
   const rec = {
     slug,
@@ -176,6 +224,7 @@ async function createListing({ name, description, upstream, price, seller, signa
     earnedAtomic: '0',
     refundedAtomic: '0',
   }
+  if (priv) rec.privateHeadersEnc = encryptHeaders(priv) // encrypted at rest; never exposed
   listings.set(slug, rec)
   save()
   return { rec, split: { atomic: String(atomic), fee: String(fee), sellerShare: String(sellerShare) } }
@@ -257,6 +306,7 @@ function earningsFor(seller) {
     listings: mine.map(l => ({
       slug: l.slug, name: l.name, status: l.status, price: l.price,
       hits: l.hits, paid: l.paid, failed: l.failed || 0, refunded: l.refunded || 0,
+      privateHeaders: !!l.privateHeadersEnc, // flag only — values stay encrypted at rest
       reputation: reputationOf(l),
       earned: ethers.formatUnits(BigInt(l.earnedAtomic || 0), 6),
     })),
@@ -284,13 +334,17 @@ function requirement(rec, resource, spender) {
 }
 
 /* ---------- upstream fetch (post-payment delivery) ---------- */
-function fetchJson(urlStr, timeoutMs = 8000, depth = 0) {
+function fetchJson(urlStr, timeoutMs = 8000, depth = 0, extraHeaders) {
   return new Promise((resolve, reject) => {
     const lib = String(urlStr).startsWith('http:') ? http : https
-    lib.get(urlStr, { headers: { accept: 'application/json', 'user-agent': 'TRIBUTE-marketplace/1.0' }, timeout: timeoutMs }, res => {
+    const headers = { accept: 'application/json', 'user-agent': 'TRIBUTE-marketplace/1.0', ...(extraHeaders || {}) }
+    lib.get(urlStr, { headers, timeout: timeoutMs }, res => {
       if (res.statusCode >= 301 && res.statusCode <= 308 && res.headers.location && depth < 2) {
         res.resume()
-        resolve(fetchJson(new URL(res.headers.location, urlStr).toString(), timeoutMs, depth + 1))
+        const next = new URL(res.headers.location, urlStr)
+        // Private headers must never follow a redirect to a different host.
+        const carry = next.host === new URL(urlStr).host ? extraHeaders : undefined
+        resolve(fetchJson(next.toString(), timeoutMs, depth + 1, carry))
         return
       }
       if (res.statusCode !== 200) { res.resume(); reject(new Error('upstream HTTP ' + res.statusCode)); return }
@@ -308,5 +362,6 @@ load()
 module.exports = {
   createListing, revoke, get, catalog, recordHit, recordFail, recordRefund, recordSettle, earningsFor, reputationOf,
   fetchJson, assertSafeUpstream, splitPrice, setReservedSlugCheck, requirement,
+  privateHeadersFor: (rec) => (rec && rec.privateHeadersEnc ? decryptHeaders(rec.privateHeadersEnc) : null),
   DOMAIN, LISTING_TYPES, REVOKE_TYPES, FEE_BPS, listings,
 }
