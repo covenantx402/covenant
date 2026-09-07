@@ -22,6 +22,9 @@ marketplace.setReservedSlugCheck((slug) => x402r.has(slug))
 
 const UPSTREAM = process.env.TRIBUTE_RPC_UPSTREAM
 const PORT = Number(process.env.TRIBUTE_PORT || 8792)
+/* Canonical public origin — used as the `resource` in every 402 challenge and
+   in discovery docs (x402scan / CDP Bazaar). Was the placeholder tribute.re. */
+const PUBLIC_ORIGIN = (process.env.TRIBUTE_PUBLIC_ORIGIN || 'https://api-gw.tributex402.com').replace(/\/+$/, '')
 const ALLOW = new Set(['eth_chainId', 'eth_blockNumber', 'eth_gasPrice', 'eth_getBlockByNumber', 'net_version', 'eth_call'])
 
 if (!UPSTREAM) { console.error('TRIBUTE_RPC_UPSTREAM missing'); process.exit(1) }
@@ -69,6 +72,26 @@ function authKey(req) {
 function send(res, code, obj) {
   res.statusCode = code
   res.end(JSON.stringify(obj))
+}
+
+/* 402 with both x402 challenge transports: JSON body (v1 legacy) AND the
+   base64 `Payment-Required` header (v2) — x402scan / CDP Bazaar accept either,
+   some clients only read the header. */
+function send402(res, body) {
+  res.statusCode = 402
+  const json = JSON.stringify(body)
+  const b64 = Buffer.from(json).toString('base64')
+  res.setHeader('Payment-Required', b64)
+  res.setHeader('X-PAYMENT-REQUIRED', b64)
+  res.end(json)
+}
+
+/* Receipt check that also honours intents signed against the old placeholder
+   resource origin (https://tribute.re) so in-flight sessions/receipts keep
+   working after the canonical-origin switch. */
+function paidFor(header, resource) {
+  return facilitator.paymentRecordFor(header, resource) ||
+    facilitator.paymentRecordFor(header, resource.replace(PUBLIC_ORIGIN, 'https://tribute.re'))
 }
 
 /* Marketplace fee split, derived SERVER-SIDE from the payment intent's
@@ -181,7 +204,7 @@ const articleCache = new Map() // url -> {t, json}
 const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Headers', 'content-type,authorization,x-api-key,x-payment')
-  res.setHeader('Access-Control-Expose-Headers', 'X-PAYMENT,Content-Type')
+  res.setHeader('Access-Control-Expose-Headers', 'X-PAYMENT,X-PAYMENT-REQUIRED,Payment-Required,Content-Type')
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS')
   res.setHeader('Content-Type', 'application/json')
   if (req.method === 'OPTIONS') { res.end(); return }
@@ -216,6 +239,99 @@ const server = http.createServer(async (req, res) => {
 
   // ============ open endpoints (no auth) ============
 
+  if (req.method === 'GET' && url === '/health') {
+    send(res, 200, { ok: true, network: 'eip155:4663', asset: x402r.USDG, origin: PUBLIC_ORIGIN, apis: x402r.list().length })
+    return
+  }
+
+  // Tiny SVG favicon so discovery auditors (x402scan) don't flag FAVICON_MISSING.
+  if (req.method === 'GET' && (url === '/favicon.ico' || url === '/favicon.svg')) {
+    res.statusCode = 200
+    res.setHeader('Content-Type', 'image/svg+xml')
+    res.setHeader('Cache-Control', 'public, max-age=86400')
+    res.end('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#0b0e14"/><path d="M8 11h16M16 11v12" stroke="#ffd75e" stroke-width="3" stroke-linecap="round"/><circle cx="16" cy="26" r="1.8" fill="#4ade80"/></svg>')
+    return
+  }
+
+  /* ---- x402scan / agent discovery (docs/DISCOVERY.md, Merit-Systems/x402scan)
+     Precedence: 1) /openapi.json  2) /.well-known/x402. Paid ops need
+     x-payment-info + a 402 response + input/output schemas; free ops need
+     "security": [] so the scanner doesn't probe them. Resources are dynamic —
+     rebuilt per request from the live route + marketplace registries. */
+  if (req.method === 'GET' && url === '/openapi.json') {
+    const spender = facilitator.publicView().spender || process.env.TRIBUTE_X402_PAYTO || '0x0000000000000000000000000000000000000000'
+    const paidOp = (slug, summary, price, extraDesc) => ({
+      get: {
+        operationId: 'paid_' + slug.replace(/-/g, '_'),
+        summary,
+        description: extraDesc || `Pay-per-call in USDG on Robinhood Chain (eip155:4663) via x402. Unpaid GET returns a 402 challenge; settle it with POST /facilitator/settle, then replay the receipt as X-PAYMENT.`,
+        tags: ['Paid APIs'],
+        parameters: [{ name: 'X-PAYMENT', in: 'header', required: false, description: 'Base64 x402 receipt from POST /facilitator/settle. Omit → HTTP 402 challenge.', schema: { type: 'string' } }],
+        'x-payment-info': {
+          price: { mode: 'fixed', currency: 'USD', amount: String(price) },
+          protocols: [{ x402: { network: 'eip155:4663', scheme: 'exact', payTo: spender, asset: x402r.USDG } }]
+        },
+        security: [{ x402: [] }],
+        responses: {
+          '200': {
+            description: 'Delivered payload (application/json) once payment is settled',
+            content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean' }, api: { type: 'string' }, tx: { type: 'string' }, payload: { type: 'object', additionalProperties: true } }, required: ['payload'] } } }
+          },
+          '402': { description: 'Payment Required — x402 challenge in body and Payment-Required header' }
+        }
+      }
+    })
+    const paths = {}
+    for (const rec of x402r.list()) {
+      paths['/x402/api/' + rec.slug] = paidOp(rec.slug, rec.description || rec.slug, rec.price)
+    }
+    for (const l of marketplace.catalog()) {
+      paths['/x402/api/' + l.slug] = paidOp(l.slug, l.description || l.name, l.price,
+        `Marketplace listing by ${l.seller}. ${l.description || l.name} Pay-per-call in USDG on Robinhood Chain (eip155:4663) via x402.`)
+    }
+    paths['/x402/premium'] = paidOp('premium', 'TRIBUTE premium alert sample — 0.01 USDG (also opens a 100-call session option)', '0.01')
+    send(res, 200, {
+      openapi: '3.1.0',
+      info: {
+        title: 'TRIBUTE x402 Gateway',
+        version: '1.0.0',
+        description: 'A next-gen x402 distribution layer for smarter launches. Pay-per-call APIs settled in USDG on Robinhood Chain 4663 — no accounts, no API keys, payment is authentication.',
+        'x-guidance': 'Every /x402/api/<slug> route returns HTTP 402 with an x402 challenge until paid. Flow: GET the route → read accepts[0] → approve USDG to extra.spender → sign the EIP-712 PaymentIntent (domain name TRIBUTE, chainId 4663, verifyingContract = USDG) → POST /facilitator/settle {intent,signature} → replay the returned base64 receipt as X-PAYMENT header on the same GET. High-volume agents: settle once with resource "session" (0.01 USDG = 100 calls / 1h) then POST /session/redeem per call. Discovery catalog of routes: GET /x402/apis (free).',
+        contact: { name: 'TRIBUTE', url: 'https://tributex402.com' }
+      },
+      servers: [{ url: PUBLIC_ORIGIN, description: 'TRIBUTE gateway (Robinhood Chain 4663 / USDG)' }],
+      security: [{ x402: [] }],
+      tags: [{ name: 'Paid APIs', description: 'x402 pay-per-call endpoints in USDG' }],
+      components: {
+        securitySchemes: {
+          x402: { type: 'http', scheme: 'BAP', description: 'x402 HTTP payments — pay-per-call in USDG on eip155:4663 (no credentials). See https://docs.x402.org' }
+        }
+      },
+      paths: {
+        ...paths,
+        '/x402/apis': { get: { operationId: 'list_apis', summary: 'Catalog of paid APIs + prices (free)', security: [], responses: { '200': { description: 'JSON catalog' } } } },
+        '/x402/marketplace': { get: { operationId: 'list_marketplace', summary: 'Third-party marketplace listings (free)', security: [], responses: { '200': { description: 'JSON catalog' } } } },
+        '/facilitator': { get: { operationId: 'facilitator_status', summary: 'Settlement config (free)', security: [], responses: { '200': { description: 'JSON status' } } } },
+        '/health': { get: { operationId: 'health', summary: 'Health check (free)', security: [], responses: { '200': { description: 'ok' } } } }
+      }
+    })
+    return
+  }
+
+  if (req.method === 'GET' && url === '/.well-known/x402') {
+    const resources = [
+      PUBLIC_ORIGIN + '/x402/premium',
+      ...x402r.list().map(r2 => PUBLIC_ORIGIN + '/x402/api/' + r2.slug),
+      ...marketplace.catalog().map(l => PUBLIC_ORIGIN + '/x402/api/' + l.slug)
+    ]
+    send(res, 200, {
+      version: 1,
+      resources,
+      instructions: 'TRIBUTE x402 gateway — USDG on Robinhood Chain 4663. See /openapi.json for the canonical machine-readable contract.'
+    })
+    return
+  }
+
   if (req.method === 'GET' && url === '/x402/apis') {
     res.end(JSON.stringify({
       network: 'eip155:4663',
@@ -245,7 +361,7 @@ const server = http.createServer(async (req, res) => {
     let rec = x402r.get(slug)
     const mkt = rec ? null : marketplace.get(slug)
     if (!rec && !mkt) { send(res, 404, { error: 'unknown api' }); return }
-    const resource = 'https://tribute.re/x402/api/' + slug + (wantPlan ? '?plan=1' : '')
+    const resource = PUBLIC_ORIGIN + '/x402/api/' + slug + (wantPlan ? '?plan=1' : '')
     // ---- API-key path (prepaid balance): no per-call wallet signature ----
     const apiKey = req.headers['x-api-key']
     if (apiKey) {
@@ -264,7 +380,7 @@ const server = http.createServer(async (req, res) => {
       await deliverByKey(res, slug, mkt, rec, owner, sub ? 0n : debitAmt, sub)
       return
     }
-    const paid = facilitator.paymentRecordFor(req.headers['x-payment'], resource)
+    const paid = paidFor(req.headers['x-payment'], resource)
     if (!paid && !rec) {
       // marketplace listing: build the challenge from the listing record
       marketplace.recordHit(slug)
@@ -276,14 +392,14 @@ const server = http.createServer(async (req, res) => {
         reqt.description = `${mkt.name} — ${mkt.plan.calls} calls for ${mkt.plan.price} USDG (subscription)`
         reqt.extra = { ...reqt.extra, plan: true, planCalls: mkt.plan.calls, planPrice: mkt.plan.price }
       }
-      send(res, 402, { x402Version: 1, error: 'PAYMENT_REQUIRED', accepts: [reqt] })
+      send402(res, { x402Version: 1, error: 'PAYMENT_REQUIRED', accepts: [reqt] })
       return
     }
     if (!paid) {
       x402r.bump(slug)
       const reqt = x402r.requirement(rec, resource)
       reqt.extra = { ...reqt.extra, spender: facilitator.publicView().spender || null }
-      send(res, 402, { x402Version: 1, error: 'PAYMENT_REQUIRED', accepts: [reqt] })
+      send402(res, { x402Version: 1, error: 'PAYMENT_REQUIRED', accepts: [reqt] })
       return
     }
     // settled on-chain (nonce anchored to a tx) → deliver the REAL resource.
@@ -381,14 +497,14 @@ const server = http.createServer(async (req, res) => {
   // x402 playground — Apache-2.0 protocol shape (x402-foundation/x402). Unpaid GET → 402.
   if (req.url.startsWith('/x402/premium') || req.url === '/x402' || req.url === '/x402/') {
     const payTo = process.env.TRIBUTE_X402_PAYTO || '0x0000000000000000000000000000000000000000'
-    const body = JSON.stringify({
+    const body = {
       x402Version: 1,
       error: 'PAYMENT_REQUIRED',
       accepts: [{
         scheme: 'tribute-intent',        // approve+transferFrom settlement (USDG on 4663 has no EIP-3009)
         network: 'eip155:4663',
         maxAmountRequired: '10000',
-        resource: req.url,
+        resource: PUBLIC_ORIGIN + '/x402/premium',
         description: 'TRIBUTE premium alert sample — 0.01 USDG',
         mimeType: 'application/json',
         payTo,
@@ -409,11 +525,9 @@ const server = http.createServer(async (req, res) => {
         asset: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168',
         extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION, spender: (facilitator.publicView().spender || null), calls: 100, ttlSec: 3600 }
       }]
-    })
-    res.statusCode = 402
-    res.setHeader('X-PAYMENT-REQUIRED', Buffer.from(body).toString('base64'))
+    }
     x402r.log('402', { slug: 'premium', path: '/premium', price: '0.01' })
-    res.end(body)
+    send402(res, body)
     return
   }
 
@@ -669,7 +783,7 @@ const server = http.createServer(async (req, res) => {
       accepts: [{
         scheme: 'exact', network: 'eip155:4663',
         maxAmountRequired: String(x402r.priceToAtomic(amount)),
-        resource: 'https://tribute.re/x402/balance/topup',
+        resource: PUBLIC_ORIGIN + '/x402/balance/topup',
         description: `TRIBUTE balance top-up ${amount} USDG for ${buyer}`,
         mimeType: 'application/json',
         payTo: facilitator.publicView().spender,
@@ -683,7 +797,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && url === '/x402/balance/redeem') {
     readBody(req, (err, payload) => {
       if (err) { send(res, 400, { error: 'bad json' }); return }
-      const paid = facilitator.paymentRecordFor(payload['x-payment'] || payload.xPayment, 'https://tribute.re/x402/balance/topup')
+      const paid = paidFor(payload['x-payment'] || payload.xPayment, PUBLIC_ORIGIN + '/x402/balance/topup')
       if (!paid) { send(res, 402, { error: 'PAYMENT_REQUIRED', reason: 'settle the top-up intent first (POST /facilitator/settle), then redeem its receipt' }); return }
       if (!facilitator.claimReceipt(paid.nonce)) { send(res, 409, { error: 'receipt already redeemed' }); return }
       const r = balance.credit(paid.from, paid.value, `top-up ${ethers.formatUnits(BigInt(paid.value), 6)} USDG`)

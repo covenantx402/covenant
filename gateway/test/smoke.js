@@ -13,6 +13,8 @@ const assert = require('assert')
 const PORT = 8971
 const BASE = `http://127.0.0.1:${PORT}`
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tribute-test-'))
+// Isolate in-process module stores too (reputation is required directly below).
+process.env.TRIBUTE_REPUTATION_STORE = path.join(tmp, 'reputation.json')
 
 function req(method, p, body, headers = {}) {
   return new Promise((resolve, reject) => {
@@ -41,6 +43,8 @@ function startServer() {
         TRIBUTE_KEYS_STORE: path.join(tmp, 'keys.json'),
         TRIBUTE_WALLETS_STORE: path.join(tmp, 'wallets.json'),
         TRIBUTE_SETTLE_STORE: path.join(tmp, 'settle.json'),
+        TRIBUTE_REPUTATION_STORE: path.join(tmp, 'reputation.json'),
+        TRIBUTE_ROUTES_STORE: path.join(tmp, 'routes.json'),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
