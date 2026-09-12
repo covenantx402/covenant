@@ -16,6 +16,7 @@ const { DOMAIN_NAME, DOMAIN_VERSION } = require('./facilitator')
 const ratelimit = require('./ratelimit')
 const sessions = require('./sessions')
 const reputation = require('./reputation')
+const x402v2 = require('./x402-v2')
 
 // marketplace slugs must never collide with TRIBUTE's own paid routes
 marketplace.setReservedSlugCheck((slug) => x402r.has(slug))
@@ -74,15 +75,49 @@ function send(res, code, obj) {
   res.end(JSON.stringify(obj))
 }
 
-/* 402 with both x402 challenge transports: JSON body (v1 legacy) AND the
-   base64 `Payment-Required` header (v2) — x402scan / CDP Bazaar accept either,
-   some clients only read the header. */
+/* 402 with BOTH real x402 challenge transports:
+   - JSON body: v1 legacy shape (`maxAmountRequired`, resource/description/mimeType
+     inline per-accept) — unchanged wire format for existing clients/tests.
+   - `Payment-Required` / `X-PAYMENT-REQUIRED` headers: a genuine v2-shaped,
+     base64-encoded PaymentRequired object (via the official `@x402/core`
+     codec) — NOT just the v1 body re-encoded. Previously these headers
+     carried base64(v1 JSON), which is mislabeled: v2 clients/scanners that
+     decode the header and validate against PaymentRequiredV2Schema (renamed
+     `amount` field, `resource` as an object, `extensions.bazaar` discovery
+     block) would reject it. Deriving a real v2 body from the same v1
+     `accepts[]` here means every 402 call site gets both transports for
+     free, with no per-route changes needed. */
 function send402(res, body) {
   res.statusCode = 402
   const json = JSON.stringify(body)
-  const b64 = Buffer.from(json).toString('base64')
-  res.setHeader('Payment-Required', b64)
-  res.setHeader('X-PAYMENT-REQUIRED', b64)
+  res.setHeader('X-PAYMENT-REQUIRED-V1', Buffer.from(json).toString('base64')) // legacy transport, kept for anything still reading it
+  try {
+    const v1Accepts = Array.isArray(body.accepts) ? body.accepts : []
+    if (v1Accepts.length) {
+      const first = v1Accepts[0]
+      const v2 = x402v2.buildV2Response({
+        resourceUrl: first.resource && first.resource !== 'session' ? first.resource : (PUBLIC_ORIGIN + '/x402/premium'),
+        description: first.description,
+        mimeType: first.mimeType || 'application/json',
+        accepts: v1Accepts.map(a => x402v2.acceptV2({
+          scheme: a.scheme === 'tribute-session' ? a.scheme : 'exact',
+          network: a.network,
+          amount: a.maxAmountRequired,
+          payTo: a.payTo,
+          asset: a.asset,
+          maxTimeoutSeconds: a.maxTimeoutSeconds,
+          extra: a.extra,
+        })),
+        bazaarInput: { type: 'http', method: 'GET' },
+      })
+      if (v2.header) {
+        res.setHeader('Payment-Required', v2.header)
+        res.setHeader('X-PAYMENT-REQUIRED', v2.header)
+      }
+    }
+  } catch (e) {
+    console.error('v2 402 header build failed, v1 body still served:', e.message)
+  }
   res.end(json)
 }
 
@@ -204,7 +239,7 @@ const articleCache = new Map() // url -> {t, json}
 const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Headers', 'content-type,authorization,x-api-key,x-payment')
-  res.setHeader('Access-Control-Expose-Headers', 'X-PAYMENT,X-PAYMENT-REQUIRED,Payment-Required,Content-Type')
+  res.setHeader('Access-Control-Expose-Headers', 'X-PAYMENT,X-PAYMENT-REQUIRED,X-PAYMENT-REQUIRED-V1,Payment-Required,Content-Type')
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS')
   res.setHeader('Content-Type', 'application/json')
   if (req.method === 'OPTIONS') { res.end(); return }
@@ -294,10 +329,11 @@ const server = http.createServer(async (req, res) => {
       openapi: '3.1.0',
       info: {
         title: 'TRIBUTE x402 Gateway',
-        version: '1.0.0',
-        description: 'A next-gen x402 distribution layer for smarter launches. Pay-per-call APIs settled in USDG on Robinhood Chain 4663 — no accounts, no API keys, payment is authentication.',
-        'x-guidance': 'Every /x402/api/<slug> route returns HTTP 402 with an x402 challenge until paid. Flow: GET the route → read accepts[0] → approve USDG to extra.spender → sign the EIP-712 PaymentIntent (domain name TRIBUTE, chainId 4663, verifyingContract = USDG) → POST /facilitator/settle {intent,signature} → replay the returned base64 receipt as X-PAYMENT header on the same GET. High-volume agents: settle once with resource "session" (0.01 USDG = 100 calls / 1h) then POST /session/redeem per call. Discovery catalog of routes: GET /x402/apis (free).',
-        contact: { name: 'TRIBUTE', url: 'https://tributex402.com' }
+        version: '2.0.0',
+        description: 'A next-gen x402 distribution layer for smarter launches. Pay-per-call APIs settled in USDG on Robinhood Chain 4663 — no accounts, no API keys, payment is authentication. Serves x402 v1 (JSON body) and v2 (Payment-Required header, extensions.bazaar discovery) simultaneously on every paid route.',
+        'x-guidance': 'Every /x402/api/<slug> route returns HTTP 402 with an x402 challenge until paid — GET/POST/HEAD all reach the challenge. Flow: read the 402 (v1: JSON body accepts[]; v2: decode the base64 Payment-Required header) → approve USDG to extra.spender → sign the EIP-712 PaymentIntent (domain name TRIBUTE, chainId 4663, verifyingContract = USDG) → POST /facilitator/settle {intent,signature} → replay the returned base64 receipt as X-PAYMENT header on the same GET. High-volume agents: settle once with resource "session" (0.01 USDG = 100 calls / 1h) then POST /session/redeem per call. Discovery catalog of routes: GET /x402/apis (free).',
+        contact: { name: 'TRIBUTE', url: 'https://tributex402.com' },
+        'x-discovery': { protocolVersions: [1, 2] }
       },
       servers: [{ url: PUBLIC_ORIGIN, description: 'TRIBUTE gateway (Robinhood Chain 4663 / USDG)' }],
       security: [{ x402: [] }],
@@ -355,7 +391,11 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  if (req.method === 'GET' && url.startsWith('/x402/api/')) {
+  // x402scan / agent probes use method-aware fallback (often POST or HEAD
+  // before GET). Any of GET/POST/HEAD must reach the same 402-challenge path
+  // instead of falling through to the generic 404 — that 404 is exactly what
+  // made these routes register as "no valid x402 response found".
+  if ((req.method === 'GET' || req.method === 'POST' || req.method === 'HEAD') && url.startsWith('/x402/api/')) {
     const slug = url.slice('/x402/api/'.length).split('/')[0]
     const wantPlan = /[?&]plan=1/.test(req.url) // Tahap 5: buy an N-call subscription
     let rec = x402r.get(slug)
@@ -494,14 +534,19 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  // x402 playground — Apache-2.0 protocol shape (x402-foundation/x402). Unpaid GET → 402.
+  // x402 playground — Apache-2.0 protocol shape (x402-foundation/x402). Unpaid GET/POST/HEAD → 402.
+  // scheme is "exact" to match the OpenAPI x-payment-info declaration — x402scan's
+  // parser rejects challenges whose runtime scheme doesn't match the discovery doc.
+  // Settlement itself (facilitator.settle) verifies the signed EIP-712 intent, not
+  // this label, so relabeling tribute-intent -> exact is safe and doesn't change
+  // the actual approve+transferFrom flow (USDG on 4663 has no EIP-3009).
   if (req.url.startsWith('/x402/premium') || req.url === '/x402' || req.url === '/x402/') {
     const payTo = process.env.TRIBUTE_X402_PAYTO || '0x0000000000000000000000000000000000000000'
     const body = {
       x402Version: 1,
       error: 'PAYMENT_REQUIRED',
       accepts: [{
-        scheme: 'tribute-intent',        // approve+transferFrom settlement (USDG on 4663 has no EIP-3009)
+        scheme: 'exact',
         network: 'eip155:4663',
         maxAmountRequired: '10000',
         resource: PUBLIC_ORIGIN + '/x402/premium',

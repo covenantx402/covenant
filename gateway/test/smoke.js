@@ -171,8 +171,18 @@ async function main() {
 
     // x402 402 challenge advertises session option
     const r402b = await req('GET', '/x402/premium')
-    const reqs = JSON.parse(Buffer.from(r402b.headers['x-payment-required'], 'base64').toString())
+    const reqs = JSON.parse(Buffer.from(r402b.headers['x-payment-required-v1'], 'base64').toString())
     assert.ok(reqs.accepts.some(a => a.scheme === 'tribute-session')); ok('402 challenge offers session scheme')
+
+    // x402 v2: Payment-Required / X-PAYMENT-REQUIRED now carry a genuine v2
+    // PaymentRequired object (renamed `amount` field, resource as an object,
+    // extensions.bazaar), not just base64(v1 body) mislabeled as v2.
+    const { decodePaymentRequiredHeader } = require('@x402/core/http')
+    const v2 = decodePaymentRequiredHeader(r402b.headers['x-payment-required'])
+    assert.strictEqual(v2.x402Version, 2); ok('402 challenge also serves a real v2 header')
+    assert.ok(typeof v2.resource === 'object' && v2.resource.url); ok('v2 header has resource.url object')
+    assert.ok(v2.accepts.every(a => typeof a.amount === 'string' && a.maxAmountRequired === undefined)); ok('v2 accepts use amount, not maxAmountRequired')
+    assert.ok(v2.extensions && v2.extensions.bazaar && v2.extensions.bazaar.info); ok('v2 header carries extensions.bazaar discovery block')
 
     console.log(`\nSMOKE PASS — ${pass} checks`)
   } finally {
