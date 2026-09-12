@@ -1,17 +1,18 @@
 {
-  "name": "tribute-gateway",
+  "name": "proxy",
   "version": "1.0.0",
   "main": "agent-vault.js",
   "scripts": {
-    "start": "node server.js",
-    "test": "node test/smoke.js"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
   },
   "keywords": [],
-  "author": "TRIBUTE",
-  "license": "MIT",
-  "description": "TRIBUTE x402 gateway — paid agent APIs, credential vault, and on-chain USDG settlement on Robinhood Chain 4663",
+  "author": "",
+  "license": "ISC",
+  "description": "",
   "dependencies": {
     "@x402/core": "^2.25.0",
+    "better-sqlite3": "^12.11.1",
     "ethers": "^6.17.0"
   }
 }

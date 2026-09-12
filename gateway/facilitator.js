@@ -19,8 +19,7 @@
 // is the correct domain name. Must stay in sync with frontend
 // /root/tributex402/src/lib/pay.ts DOMAIN.
 const { ethers } = require('ethers')
-const fs = require('fs')
-const path = require('path')
+const db = require('./db')
 
 const CHAIN_ID = 4663
 const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'
@@ -47,35 +46,43 @@ const INTENT_TYPES = {
   ],
 }
 
-// replay protection: nonces consumed by this facilitator process
-// (persisted so restarts don't allow replay)
-const STORE_PATH = process.env.TRIBUTE_SETTLE_STORE ||
-  path.join(__dirname, 'data', 'settlements.json')
-const usedNonces = new Map() // nonce -> { txHash, t, from, value }
-const settleLog = []         // recent settlements (kept for dashboard)
+// nonce + settlement log now live in SQLite (see db.js) — indexed lookups,
+// no more full-file JSON rewrite on every single settlement.
+const stmts = {
+  nonceGet: db.prepare('SELECT * FROM nonces WHERE nonce = ?'),
+  nonceInsert: db.prepare('INSERT INTO nonces (nonce, tx_hash, t, from_addr, value, redeemed) VALUES (?,?,?,?,?,0) ON CONFLICT(nonce) DO NOTHING'),
+  nonceClaim: db.prepare('INSERT INTO nonces (nonce, tx_hash, t, from_addr, value, redeemed) VALUES (?,NULL,?,NULL,\'0\',0) ON CONFLICT(nonce) DO NOTHING'),
+  nonceRedeem: db.prepare('UPDATE nonces SET redeemed = 1 WHERE nonce = ? AND redeemed = 0'),
+  nonceDelete: db.prepare('DELETE FROM nonces WHERE nonce = ?'),
+  settleInsert: db.prepare('INSERT INTO settlements (tx_hash, t, payer, pay_to, value, value_formatted, resource, gas_used, pending_splits, splits, splits_cancelled) VALUES (?,?,?,?,?,?,?,?,?,?,0)'),
+  settleByTx: db.prepare('SELECT * FROM settlements WHERE tx_hash = ?'),
+  settleRecent: db.prepare('SELECT * FROM settlements ORDER BY t DESC LIMIT ?'),
+  settleAll: db.prepare('SELECT * FROM settlements ORDER BY t DESC'),
+  settleCount: db.prepare('SELECT COUNT(*) AS n FROM settlements'),
+  settleTotalUsdg: db.prepare('SELECT COALESCE(SUM(CAST(value_formatted AS REAL)), 0) AS n FROM settlements'),
+  settleSetSplits: db.prepare('UPDATE settlements SET pending_splits = ? WHERE tx_hash = ?'),
+  settleFinalizeSplits: db.prepare('UPDATE settlements SET splits = ?, pending_splits = NULL WHERE tx_hash = ?'),
+  settleCancelSplits: db.prepare('UPDATE settlements SET pending_splits = NULL, splits_cancelled = 1 WHERE tx_hash = ?'),
+}
 
-function load() {
-  try {
-    fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true })
-    if (fs.existsSync(STORE_PATH)) {
-      const data = JSON.parse(fs.readFileSync(STORE_PATH, 'utf8'))
-      // v1 shape: { nonce: rec }. v2 shape: { nonces: {...}, log: [...] }
-      if (data.nonces) {
-        for (const [k, v] of Object.entries(data.nonces)) usedNonces.set(k, v)
-        if (Array.isArray(data.log)) for (const r of data.log.slice(0, 100)) settleLog.push(r)
-      } else {
-        for (const [k, v] of Object.entries(data)) usedNonces.set(k, v)
-      }
-    }
-  } catch (e) { console.error('settlement load failed:', e.message) }
+function rowToSettleRecord(r) {
+  return {
+    t: r.t,
+    payer: r.payer,
+    to: r.pay_to,
+    value: r.value,
+    valueFormatted: r.value_formatted,
+    resource: r.resource || '',
+    txHash: r.tx_hash,
+    gasUsed: r.gas_used,
+    pendingSplits: r.pending_splits ? JSON.parse(r.pending_splits) : null,
+    splits: r.splits ? JSON.parse(r.splits) : undefined,
+    splitsCancelled: !!r.splits_cancelled,
+  }
 }
-function save() {
-  fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true })
-  const tmp = STORE_PATH + '.tmp'
-  fs.writeFileSync(tmp, JSON.stringify({ nonces: Object.fromEntries(usedNonces), log: settleLog.slice(0, 100) }))
-  fs.renameSync(tmp, STORE_PATH)
-}
-load()
+
+function usedNoncesHas(nonce) { return !!stmts.nonceGet.get(nonce) }
+
 
 function provider() {
   return new ethers.JsonRpcProvider(process.env.TRIBUTE_RPC_UPSTREAM)
@@ -89,6 +96,7 @@ function settlementWallet() {
 
 function publicView() {
   const w = settlementWallet()
+  const recent = stmts.settleRecent.all(12).map(rowToSettleRecord)
   return {
     chainId: CHAIN_ID,
     asset: USDG,
@@ -97,9 +105,9 @@ function publicView() {
     eip3009: false,
     pattern: 'approve+transferFrom',
     spender: w ? w.address : null,
-    settled: settleLog.length,
-    totalSettledUsdg: settleLog.reduce((s, x) => s + Number(x.valueFormatted || 0), 0),
-    recent: settleLog.slice(0, 12),
+    settled: stmts.settleCount.get().n,
+    totalSettledUsdg: stmts.settleTotalUsdg.get().n,
+    recent,
   }
 }
 
@@ -122,7 +130,7 @@ async function verify(intent, signature) {
     if (validAfter > BigInt(now)) return { ok: false, reason: 'authorization not yet valid' }
     if (validBefore - BigInt(now) > 600n) return { ok: false, reason: 'authorization window too long (max 600s)' }
 
-    if (usedNonces.has(intent.nonce)) return { ok: false, reason: 'nonce already used' }
+    if (usedNoncesHas(intent.nonce)) return { ok: false, reason: 'nonce already used' }
 
     const signer = ethers.verifyTypedData(DOMAIN, INTENT_TYPES, intent, signature)
     if (signer.toLowerCase() !== String(intent.from).toLowerCase()) {
@@ -199,10 +207,8 @@ async function settle(intent, signature, splits = null) {
       txHash: receipt.hash,
       gasUsed: receipt.gasUsed?.toString?.() || null,
     }
-    usedNonces.set(intent.nonce, { txHash: rec.txHash, t: rec.t, from: rec.payer, value: rec.value })
-    settleLog.unshift(rec)
-    if (settleLog.length > 100) settleLog.length = 100
-    save()
+    stmts.nonceInsert.run(intent.nonce, rec.txHash, rec.t, rec.payer, rec.value)
+    stmts.settleInsert.run(rec.txHash, rec.t, rec.payer, rec.to, rec.value, rec.valueFormatted, rec.resource, rec.gasUsed, null, null)
 
     // Marketplace fee split: the full pull lands on the facilitator wallet
     // (intent.to). The seller leg is NOT pushed here — it is deferred until
@@ -213,7 +219,7 @@ async function settle(intent, signature, splits = null) {
       const total = splits.reduce((s, x) => s + BigInt(x.value), 0n)
       if (total <= BigInt(intent.value)) {
         rec.pendingSplits = splits.map(s => ({ to: s.to, value: String(s.value) }))
-        save()
+        stmts.settleSetSplits.run(JSON.stringify(rec.pendingSplits), rec.txHash)
       } else {
         console.error('settle: split total exceeds payment — skipping legs', String(total), '>', String(intent.value))
       }
@@ -240,10 +246,10 @@ function paymentRecordFor(header, resource) {
     if (!header) return null
     const decoded = JSON.parse(Buffer.from(String(header), 'base64').toString('utf8'))
     const intent = decoded.intent || decoded
-    const rec = usedNonces.get(intent.nonce)
+    const rec = stmts.nonceGet.get(intent.nonce)
     if (!rec) return null
     if (resource && intent.resource && intent.resource !== resource) return null
-    return { txHash: rec.txHash, from: rec.from, value: rec.value, nonce: intent.nonce }
+    return { txHash: rec.tx_hash, from: rec.from_addr, value: rec.value, nonce: intent.nonce }
   } catch { return null }
 }
 
@@ -253,12 +259,11 @@ function paymentRecordFor(header, resource) {
  * same X-PAYMENT header can never credit the ledger twice.
  */
 function claimReceipt(nonce) {
-  const rec = usedNonces.get(nonce)
+  const rec = stmts.nonceGet.get(nonce)
   if (!rec || rec.redeemed) return false
-  rec.redeemed = true
-  save()
-  return true
+  return stmts.nonceRedeem.run(nonce).changes > 0
 }
+
 
 
 /** Live block probe for /x402/health — throws if the RPC is unreachable. */
@@ -287,7 +292,7 @@ async function refundPayment({ to, value, reason }) {
   return { txHash: r.hash }
 }
 
-function settleLogAll() { return settleLog }
+function settleLogAll() { return stmts.settleAll.all().map(rowToSettleRecord) }
 
 /**
  * Pay an arbitrary recipient from the facilitator (escrow) wallet — used for
@@ -303,14 +308,12 @@ async function payout({ to, value, reason }) {
  */
 function claimNonce(nonce) {
   const k = 'act:' + String(nonce)
-  if (usedNonces.has(k)) return false
-  usedNonces.set(k, { txHash: null, t: Date.now(), from: null, value: '0' })
-  save()
-  return true
+  const info = stmts.nonceClaim.run(k, Date.now())
+  return info.changes > 0
 }
 function releaseNonce(nonce) {
   const k = 'act:' + String(nonce)
-  if (usedNonces.delete(k)) save()
+  stmts.nonceDelete.run(k)
 }
 
 /**
@@ -318,32 +321,30 @@ function releaseNonce(nonce) {
  * Returns the executed legs, or null when nothing was pending.
  */
 async function finalizeSplits(txHash) {
-  const rec = settleLog.find(r => r.txHash === txHash)
-  if (!rec || !Array.isArray(rec.pendingSplits) || !rec.pendingSplits.length) return null
+  const row = stmts.settleByTx.get(txHash)
+  if (!row || !row.pending_splits) return null
+  const pending = JSON.parse(row.pending_splits)
+  if (!Array.isArray(pending) || !pending.length) return null
   const w = settlementWallet()
   if (!w) throw new Error('settlement wallet not configured')
   const token = new ethers.Contract(USDG, ['function transfer(address to,uint256 value) returns (bool)'], w)
   const done = []
-  for (const leg of rec.pendingSplits) {
+  for (const leg of pending) {
     try {
       const t2 = await token.transfer(leg.to, leg.value)
       const r2 = await t2.wait()
       done.push({ to: leg.to, value: leg.value, txHash: r2.hash })
     } catch (e) { console.error('split leg failed:', leg.to, String(e.shortMessage || e.message)) }
   }
-  rec.splits = done
-  rec.pendingSplits = null
-  save()
+  stmts.settleFinalizeSplits.run(JSON.stringify(done), txHash)
   return done
 }
 
 /** Payment refunded to the buyer → drop the pending seller legs. */
 function cancelSplits(txHash) {
-  const rec = settleLog.find(r => r.txHash === txHash)
-  if (!rec || !rec.pendingSplits) return false
-  rec.pendingSplits = null
-  rec.splitsCancelled = true
-  save()
+  const row = stmts.settleByTx.get(txHash)
+  if (!row || !row.pending_splits) return false
+  stmts.settleCancelSplits.run(txHash)
   return true
 }
 

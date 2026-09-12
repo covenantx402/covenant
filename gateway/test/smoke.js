@@ -13,8 +13,9 @@ const assert = require('assert')
 const PORT = 8971
 const BASE = `http://127.0.0.1:${PORT}`
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tribute-test-'))
-// Isolate in-process module stores too (reputation is required directly below).
-process.env.TRIBUTE_REPUTATION_STORE = path.join(tmp, 'reputation.json')
+// Isolate in-process module stores too (reputation is required directly below,
+// so it must open the SAME sqlite file the spawned server process writes to).
+process.env.TRIBUTE_DB_PATH = path.join(tmp, 'gateway.db')
 
 function req(method, p, body, headers = {}) {
   return new Promise((resolve, reject) => {
@@ -39,11 +40,7 @@ function startServer() {
         TRIBUTE_RPC_UPSTREAM: process.env.TRIBUTE_RPC_UPSTREAM || 'https://robinhood-rpc.publicnode.com',
         TRIBUTE_PORT: String(PORT),
         TRIBUTE_SETTLE_KEY: '0x' + '11'.repeat(32),
-        TRIBUTE_VAULT_STORE: path.join(tmp, 'vault.json'),
-        TRIBUTE_KEYS_STORE: path.join(tmp, 'keys.json'),
-        TRIBUTE_WALLETS_STORE: path.join(tmp, 'wallets.json'),
-        TRIBUTE_SETTLE_STORE: path.join(tmp, 'settle.json'),
-        TRIBUTE_REPUTATION_STORE: path.join(tmp, 'reputation.json'),
+        TRIBUTE_DB_PATH: path.join(tmp, 'gateway.db'),
         TRIBUTE_ROUTES_STORE: path.join(tmp, 'routes.json'),
       },
       stdio: ['ignore', 'pipe', 'pipe'],

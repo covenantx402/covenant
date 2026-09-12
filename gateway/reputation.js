@@ -3,48 +3,38 @@
 // that has paid for resources repeatedly is accountable (has skin in the game).
 // This module scores agents locally from the facilitator's settlement log;
 // every claim is anchored to a verifiable tx hash, not a self-reported number.
-const fs = require('fs')
-const path = require('path')
+// SQLite-backed: leaderboard queries are indexed, not a full in-memory scan
+// re-derived from a JSON blob on every request.
+const db = require('./db')
 
-const STORE_PATH = process.env.TRIBUTE_REPUTATION_STORE ||
-  path.join(__dirname, 'data', 'reputation.json')
-
-// address -> { firstSeen, lastSeen, settledCount, totalUsdg, resources: {res: count}, txs: [hash...] }
-const agents = new Map()
-
-function load() {
-  try {
-    fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true })
-    if (fs.existsSync(STORE_PATH)) {
-      for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync(STORE_PATH, 'utf8')))) agents.set(k, v)
-    }
-  } catch (e) { console.error('reputation load failed:', e.message) }
+const stmts = {
+  get: db.prepare('SELECT * FROM reputation WHERE address = ?'),
+  insert: db.prepare('INSERT INTO reputation (address, first_seen, last_seen, settled_count, total_usdg, resources, txs) VALUES (?,?,?,0,0,\'{}\',\'[]\')'),
+  update: db.prepare('UPDATE reputation SET last_seen=?, settled_count=?, total_usdg=?, resources=?, txs=? WHERE address=?'),
+  top: db.prepare('SELECT address FROM reputation ORDER BY settled_count DESC, total_usdg DESC LIMIT ?'),
+  count: db.prepare('SELECT COUNT(*) AS n FROM reputation'),
+  totalSettled: db.prepare('SELECT COALESCE(SUM(settled_count), 0) AS n FROM reputation'),
 }
-function save() {
-  fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true })
-  const tmp = STORE_PATH + '.tmp'
-  fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(agents)))
-  fs.renameSync(tmp, STORE_PATH)
-}
-load()
 
 function record(payer, { valueFormatted, resource, txHash } = {}) {
   if (!payer || !/^0x[0-9a-fA-F]{40}$/.test(payer)) return
   payer = payer.toLowerCase()
-  const a = agents.get(payer) || {
-    firstSeen: Date.now(), lastSeen: 0, settledCount: 0,
-    totalUsdg: 0, resources: {}, txs: [],
+  let a = stmts.get.get(payer)
+  const now = Date.now()
+  if (!a) {
+    stmts.insert.run(payer, now, now)
+    a = stmts.get.get(payer)
   }
-  a.lastSeen = Date.now()
-  a.settledCount++
-  a.totalUsdg += Number(valueFormatted || 0)
-  if (resource) a.resources[resource] = (a.resources[resource] || 0) + 1
+  const resources = JSON.parse(a.resources || '{}')
+  const txs = JSON.parse(a.txs || '[]')
+  const settledCount = a.settled_count + 1
+  const totalUsdg = a.total_usdg + Number(valueFormatted || 0)
+  if (resource) resources[resource] = (resources[resource] || 0) + 1
   if (txHash) {
-    a.txs.unshift(txHash)
-    if (a.txs.length > 50) a.txs.length = 50
+    txs.unshift(txHash)
+    if (txs.length > 50) txs.length = 50
   }
-  agents.set(payer, a)
-  save()
+  stmts.update.run(now, settledCount, totalUsdg, JSON.stringify(resources), JSON.stringify(txs), payer)
 }
 
 /**
@@ -55,41 +45,37 @@ function record(payer, { valueFormatted, resource, txHash } = {}) {
  *   20 pts  recency (active in last 7d = full, decays to 0 at 30d)
  */
 function score(address) {
-  const a = agents.get(String(address || '').toLowerCase())
+  const a = stmts.get.get(String(address || '').toLowerCase())
   if (!a) return { address, score: 0, tier: 'unknown', settledCount: 0, totalUsdg: 0, firstSeen: null }
-  const pay = Math.min(40, Math.log2(a.settledCount + 1) * 10)
-  const volume = Math.min(25, Math.log10(a.totalUsdg + 1) * 10)
-  const days = (Date.now() - a.firstSeen) / 86400000
+  const pay = Math.min(40, Math.log2(a.settled_count + 1) * 10)
+  const volume = Math.min(25, Math.log10(a.total_usdg + 1) * 10)
+  const days = (Date.now() - a.first_seen) / 86400000
   const longevity = Math.min(15, days * 0.5)
-  const daysSince = (Date.now() - a.lastSeen) / 86400000
+  const daysSince = (Date.now() - a.last_seen) / 86400000
   const recency = Math.max(0, 20 - daysSince * (20 / 30))
   const total = Math.round(pay + volume + longevity + recency)
   const tier = total >= 75 ? 'trusted' : total >= 40 ? 'established' : total > 0 ? 'new' : 'unknown'
+  const txs = JSON.parse(a.txs || '[]')
   return {
     address,
     score: total,
     tier,
-    settledCount: a.settledCount,
-    totalUsdg: Math.round(a.totalUsdg * 1e6) / 1e6,
-    firstSeen: a.firstSeen,
-    lastSeen: a.lastSeen,
-    resources: a.resources,
+    settledCount: a.settled_count,
+    totalUsdg: Math.round(a.total_usdg * 1e6) / 1e6,
+    firstSeen: a.first_seen,
+    lastSeen: a.last_seen,
+    resources: JSON.parse(a.resources || '{}'),
     // verifiable anchors: any third party can check these tx hashes on-chain
-    txHashes: a.txs.slice(0, 10),
+    txHashes: txs.slice(0, 10),
   }
 }
 
 function leaderboard(limit = 10) {
-  return [...agents.keys()]
-    .map(a => score(a))
-    .sort((x, y) => y.score - x.score)
-    .slice(0, limit)
+  return stmts.top.all(limit).map(r => score(r.address))
 }
 
 function stats() {
-  let settled = 0
-  for (const a of agents.values()) settled += a.settledCount
-  return { knownAgents: agents.size, totalSettlements: settled }
+  return { knownAgents: stmts.count.get().n, totalSettlements: stmts.totalSettled.get().n }
 }
 
 module.exports = { record, score, leaderboard, stats }

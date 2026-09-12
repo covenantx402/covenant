@@ -1,42 +1,25 @@
-// Agent API keys. Raw secret shown once; only sha256 is stored. Persisted to disk.
+// keys.js — agent API keys (SQLite-backed). Raw secret shown once; only sha256 is stored.
 const crypto = require('crypto')
-const fs = require('fs')
-const path = require('path')
+const db = require('./db')
 
-const STORE_PATH = process.env.TRIBUTE_KEYS_STORE ||
-  path.join(__dirname, 'data', 'keys.json')
-
-const keys = new Map() // id -> rec
-
-function load() {
-  try {
-    fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true })
-    if (fs.existsSync(STORE_PATH)) {
-      const data = JSON.parse(fs.readFileSync(STORE_PATH, 'utf8'))
-      for (const [id, rec] of Object.entries(data)) keys.set(id, rec)
-    }
-  } catch (e) {
-    console.error('keys load failed:', e.message)
-  }
+const stmts = {
+  insert: db.prepare('INSERT INTO agent_keys (id, label, prefix, hash, created_at, last_used, hits) VALUES (?,?,?,?,?,NULL,0)'),
+  byHash: db.prepare('SELECT * FROM agent_keys WHERE hash = ?'),
+  bumpUse: db.prepare('UPDATE agent_keys SET hits = hits + 1, last_used = ? WHERE id = ?'),
+  del: db.prepare('DELETE FROM agent_keys WHERE id = ?'),
+  list: db.prepare('SELECT * FROM agent_keys ORDER BY created_at DESC'),
+  count: db.prepare('SELECT COUNT(*) AS n FROM agent_keys'),
+  totalHits: db.prepare('SELECT COALESCE(SUM(hits), 0) AS n FROM agent_keys'),
 }
-
-function save() {
-  fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true })
-  const tmp = STORE_PATH + '.tmp'
-  fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(keys)))
-  fs.renameSync(tmp, STORE_PATH)
-}
-
-load()
 
 function publicView(rec) {
   return {
     id: rec.id,
     label: rec.label,
     prefix: rec.prefix,
-    createdAt: rec.createdAt,
-    lastUsed: rec.lastUsed,
-    hits: rec.hits
+    createdAt: rec.created_at,
+    lastUsed: rec.last_used,
+    hits: rec.hits,
   }
 }
 
@@ -49,12 +32,11 @@ function mint(label) {
     label: String(label || 'agent').slice(0, 40),
     prefix: raw.slice(0, 12),
     hash,
-    createdAt: Date.now(),
-    lastUsed: null,
-    hits: 0
+    created_at: Date.now(),
+    last_used: null,
+    hits: 0,
   }
-  keys.set(id, rec)
-  save()
+  stmts.insert.run(rec.id, rec.label, rec.prefix, rec.hash, rec.created_at)
   return { ...publicView(rec), key: raw }
 }
 
@@ -62,25 +44,20 @@ function verify(raw) {
   const token = String(raw || '').trim()
   if (!token.startsWith('trb_')) return null
   const hash = crypto.createHash('sha256').update(token).digest('hex')
-  for (const rec of keys.values()) {
-    if (rec.hash === hash) {
-      rec.hits++
-      rec.lastUsed = Date.now()
-      save()
-      return rec
-    }
-  }
-  return null
+  const rec = stmts.byHash.get(hash)
+  if (!rec) return null
+  stmts.bumpUse.run(Date.now(), rec.id)
+  rec.hits += 1
+  rec.last_used = Date.now()
+  return rec
 }
 
 function revoke(id) {
-  const had = keys.delete(id)
-  if (had) save()
-  return had
+  return stmts.del.run(id).changes > 0
 }
 
-function list() { return [...keys.values()].map(publicView) }
-function count() { return keys.size }
-function hits() { return [...keys.values()].reduce((s, k) => s + k.hits, 0) }
+function list() { return stmts.list.all().map(publicView) }
+function count() { return stmts.count.get().n }
+function hits() { return stmts.totalHits.get().n }
 
 module.exports = { mint, verify, revoke, list, count, hits }
