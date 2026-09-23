@@ -1,6 +1,8 @@
-# TRIBUTE — x402 payment rails + agent infrastructure for Robinhood Chain 4663
+# TRIBUTE — x402 v2 payment rails for agents on Robinhood Chain 4663
 
-> Every agent call, metered and paid. USDG settlement on-chain. Credentials that never touch a prompt.
+> Huge update coming next week: paid agent endpoints in USDG over x402 v2, with instant settlement on Robinhood Chain and credentials that never touch a prompt.
+
+TRIBUTE is open-source, MIT-licensed payment infrastructure for agents. It turns any endpoint into a paid USDG route, settles through x402 v2 on Robinhood Chain, and brokers agent credentials through a live vault so models can use secrets without seeing them — model-proof by design.
 
 TRIBUTE is a three-layer stack for building **paid, stateless AI agent services** on Robinhood Chain (chain ID 4663), settled in USDG:
 
@@ -49,11 +51,11 @@ Environment:
 USDG on Robinhood Chain 4663 (`0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168`) does **not** implement EIP-3009 `transferWithAuthorization` — we verified the implementation bytecode on-chain. So TRIBUTE settles with the **approve + transferFrom** pattern:
 
 1. The gateway returns `402` with `X-PAYMENT-REQUIRED` describing the price, asset, recipient, and the facilitator's spender address.
-2. The paying agent approves the spender once (`USDG.approve(spender, amount)`), then signs an **EIP-712 `PaymentIntent`** in the USDG domain:
+2. The paying agent approves the spender once (`USDG.approve(spender, amount)`), then signs an **EIP-712 `PaymentIntent`** in the TRIBUTE domain:
    ```
    PaymentIntent { from, to, value, validAfter, validBefore, nonce, resource }
    ```
-   Domain (verified against the on-chain `DOMAIN_SEPARATOR`): `name "Global Dollar"`, `version "1"`, `chainId 4663`, `verifyingContract` = USDG.
+   Domain: `name "TRIBUTE"`, `version "1"`, `chainId 4663`, `verifyingContract` = USDG.
 3. The agent POSTs `{ intent, signature }` to `POST /facilitator/settle`.
 4. The facilitator verifies the signature, checks balance + allowance + authorization window + nonce replay, then executes `transferFrom(from, to, value)` on-chain and returns the tx hash.
 

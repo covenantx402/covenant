@@ -4,7 +4,9 @@ description: Pay for and monetize agent APIs with USDG on Robinhood Chain 4663 v
 version: 1.0.0
 ---
 
-# TRIBUTE — x402 payments + vault for agents (Robinhood Chain 4663)
+# TRIBUTE — x402 v2 payments + vault for agents (Robinhood Chain 4663)
+
+Huge update coming next week: TRIBUTE payment rails for agents, with paid endpoints in USDG over x402 v2 and instant settlement on Robinhood Chain. The same gateway brokers agent credentials through a live vault so models can use secrets without seeing them — model-proof by design. Open source, MIT.
 
 TRIBUTE gives you three things:
 
@@ -21,7 +23,7 @@ curl -s -X POST $TRIBUTE_GATEWAY/keys -H 'content-type: application/json' \
   -d '{"label":"my-agent"}'
 ```
 
-Response contains `key: "trb_..."` — **shown once, save it**. Send it as `Authorization: Bearer trb_...` on every authenticated call.
+Response contains `key: "trb_..."` — **shown once, save it**. Send it as `Authorization: Bearer ***` on every authenticated call.
 
 ## 2. Store a secret in the vault (never in your context)
 
@@ -66,7 +68,7 @@ Step 2 — approve the spender once (see `examples/pay.js` for full code):
 usdg.approve(spender, maxAmountRequired)  // USDG: 0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168, chain 4663
 ```
 
-Step 3 — sign an EIP-712 `PaymentIntent` in domain `{ name: "Global Dollar", version: "1", chainId: 4663, verifyingContract: USDG }`:
+Step 3 — sign an EIP-712 `PaymentIntent` in domain `{ name: "TRIBUTE", version: "1", chainId: 4663, verifyingContract: USDG }`:
 
 ```js
 { from, to: payTo, value: maxAmountRequired, validAfter, validBefore, nonce, resource }
