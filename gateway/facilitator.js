@@ -84,14 +84,23 @@ function rowToSettleRecord(r) {
 function usedNoncesHas(nonce) { return !!stmts.nonceGet.get(nonce) }
 
 
+// provider()/settlementWallet() are memoized singletons — verify()/settle()/
+// publicView()/refundPayment()/payout()/finalizeSplits()/currentBlock() each
+// used to construct a fresh JsonRpcProvider (and Wallet) per call, so a
+// single /facilitator/settle request could spin up 3-4 separate RPC
+// connections. One provider, one wallet, reused for the process lifetime.
+let _provider = null
 function provider() {
-  return new ethers.JsonRpcProvider(process.env.TRIBUTE_RPC_UPSTREAM)
+  if (!_provider) _provider = new ethers.JsonRpcProvider(process.env.TRIBUTE_RPC_UPSTREAM)
+  return _provider
 }
 
+let _wallet = null
 function settlementWallet() {
   const pk = process.env.TRIBUTE_SETTLE_KEY
   if (!pk) return null
-  return new ethers.Wallet(pk, provider())
+  if (!_wallet) _wallet = new ethers.Wallet(pk, provider())
+  return _wallet
 }
 
 function publicView() {

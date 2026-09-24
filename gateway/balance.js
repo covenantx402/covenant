@@ -3,76 +3,62 @@
 // facilitator wallet as escrow; this ledger is the authoritative server-side
 // record of who owns what. Withdrawals require the owner's EIP-712 signature.
 //
-// Ledger amounts are USDG atomic (6 decimals). All mutations go through the
-// debit/credit helpers so the JSON store stays consistent (atomic rename).
+// Ledger amounts are USDG atomic (6 decimals). SQLite-backed (see db.js) —
+// indexed upserts, no more full-file JSON rewrite on every credit/debit/key
+// mint (this is the ledger holding actual escrowed USDG; it's the one place
+// a lost/corrupted flat-file write matters most).
 'use strict'
-const fs = require('fs')
-const path = require('path')
 const crypto = require('crypto')
 const { ethers } = require('ethers')
+const db = require('./db')
 
-const STORE_PATH = process.env.TRIBUTE_BALANCE_STORE ||
-  path.join(__dirname, '..', 'data', 'balances.json')
-
-const buyers = new Map()   // addrLower -> { address, balanceAtomic, keys: {keyHash}, history: [] }
-const keyIndex = new Map() // keyHash -> addrLower
-
-function save() {
-  try {
-    fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true })
-    const tmp = STORE_PATH + '.tmp'
-    const obj = {}
-    for (const [k, v] of buyers) obj[k] = v
-    fs.writeFileSync(tmp, JSON.stringify(obj))
-    fs.renameSync(tmp, STORE_PATH)
-  } catch (e) { console.error('balance save failed:', e.message) }
+const stmts = {
+  getBalance: db.prepare('SELECT * FROM balances WHERE address = ?'),
+  insertBalance: db.prepare('INSERT INTO balances (address, balance_atomic, created_at) VALUES (?,?,?) ON CONFLICT(address) DO NOTHING'),
+  setBalance: db.prepare('UPDATE balances SET balance_atomic = ? WHERE address = ?'),
+  addHistory: db.prepare('INSERT INTO balance_history (address, type, amount, note, t) VALUES (?,?,?,?,?)'),
+  recentHistory: db.prepare('SELECT type, amount, note, t FROM balance_history WHERE address = ? ORDER BY t DESC LIMIT ?'),
+  insertKey: db.prepare('INSERT INTO balance_keys (hash, address, created_at, last_used) VALUES (?,?,?,NULL)'),
+  getKey: db.prepare('SELECT * FROM balance_keys WHERE hash = ?'),
+  touchKey: db.prepare('UPDATE balance_keys SET last_used = ? WHERE hash = ?'),
+  delKey: db.prepare('DELETE FROM balance_keys WHERE hash = ?'),
+  listKeys: db.prepare('SELECT hash, created_at, last_used FROM balance_keys WHERE address = ?'),
 }
-
-function load() {
-  try {
-    if (!fs.existsSync(STORE_PATH)) return
-    const obj = JSON.parse(fs.readFileSync(STORE_PATH, 'utf8'))
-    for (const [k, v] of Object.entries(obj)) {
-      buyers.set(k, v)
-      for (const kh of Object.keys(v.keys || {})) keyIndex.set(kh, k)
-    }
-  } catch (e) { console.error('balance load failed:', e.message) }
-}
-load()
 
 function rec(addr) {
   const k = String(addr || '').toLowerCase()
   if (!ethers.isAddress(k)) return null
-  if (!buyers.has(k)) buyers.set(k, { address: ethers.getAddress(k), balanceAtomic: '0', keys: {}, history: [] })
-  return buyers.get(k)
+  let row = stmts.getBalance.get(k)
+  if (!row) {
+    stmts.insertBalance.run(k, '0', Date.now())
+    row = stmts.getBalance.get(k)
+  }
+  return { address: ethers.getAddress(k), balanceAtomic: row.balance_atomic }
 }
 
 function balanceOf(addr) {
-  const r = buyers.get(String(addr || '').toLowerCase())
-  return r ? BigInt(r.balanceAtomic || 0) : 0n
+  const row = stmts.getBalance.get(String(addr || '').toLowerCase())
+  return row ? BigInt(row.balance_atomic || 0) : 0n
 }
 
 /** Credit (top-up) or debit (call). Debit fails cleanly when funds are short. */
 function credit(addr, atomic, note) {
   const r = rec(addr); if (!r) return { ok: false, error: 'bad address' }
-  r.balanceAtomic = String(BigInt(r.balanceAtomic || 0) + BigInt(atomic))
-  push(r, { type: 'credit', amount: String(atomic), note, at: Date.now() })
-  save()
-  return { ok: true, balanceAtomic: r.balanceAtomic }
+  const k = addr.toLowerCase()
+  const next = String(BigInt(r.balanceAtomic || 0) + BigInt(atomic))
+  stmts.setBalance.run(next, k)
+  stmts.addHistory.run(k, 'credit', String(atomic), note || null, Date.now())
+  return { ok: true, balanceAtomic: next }
 }
 function debit(addr, atomic, note) {
   const r = rec(addr); if (!r) return { ok: false, error: 'bad address' }
+  const k = addr.toLowerCase()
   const v = BigInt(atomic)
   if (BigInt(r.balanceAtomic || 0) < v) return { ok: false, error: 'insufficient balance' }
-  r.balanceAtomic = String(BigInt(r.balanceAtomic) - v)
-  push(r, { type: 'debit', amount: String(v), note, at: Date.now() })
-  save()
-  return { ok: true, balanceAtomic: r.balanceAtomic }
-}
-function push(r, ev) {
-  r.history = r.history || []
-  r.history.push(ev)
-  if (r.history.length > 200) r.history = r.history.slice(-200)
+  const next = String(BigInt(r.balanceAtomic) - v)
+  stmts.setBalance.run(next, k)
+  stmts.addHistory.run(k, 'debit', String(v), note || null, Date.now())
+  return { ok: true, balanceAtomic: next }
 }
 
 // ---- API keys -------------------------------------------------------------
@@ -81,32 +67,29 @@ const keyHash = k => crypto.createHash('sha256').update(String(k)).digest('hex')
 function createKey(addr) {
   const r = rec(addr); if (!r) return null
   const key = 'trb_' + crypto.randomBytes(20).toString('base64url')
-  r.keys[keyHash(key)] = { createdAt: Date.now(), lastUsed: null }
-  keyIndex.set(keyHash(key), String(addr).toLowerCase())
-  save()
+  stmts.insertKey.run(keyHash(key), addr.toLowerCase(), Date.now())
   return { key, address: r.address }
 }
 
 /** Resolve an API key to its owner record; null when unknown. */
 function ownerByKey(key) {
-  const a = keyIndex.get(keyHash(key))
-  return a ? buyers.get(a) : null
+  const k = stmts.getKey.get(keyHash(key))
+  return k ? rec(k.address) : null
 }
 function touchKey(addr, key) {
-  const r = buyers.get(String(addr).toLowerCase())
-  const m = r && r.keys[keyHash(key)]
-  if (m) { m.lastUsed = Date.now(); save() }
+  const h = keyHash(key)
+  if (stmts.getKey.get(h)) stmts.touchKey.run(Date.now(), h)
 }
 function revokeKey(addr, key) {
-  const r = buyers.get(String(addr).toLowerCase()); if (!r) return false
   const h = keyHash(key)
-  if (!r.keys[h]) return false
-  delete r.keys[h]; keyIndex.delete(h); save()
+  const row = stmts.getKey.get(h)
+  if (!row || row.address !== String(addr).toLowerCase()) return false
+  stmts.delKey.run(h)
   return true
 }
 function listKeys(addr) {
-  const r = buyers.get(String(addr).toLowerCase()); if (!r) return []
-  return Object.values(r.keys).map(m => ({ createdAt: m.createdAt, lastUsed: m.lastUsed }))
+  return stmts.listKeys.all(String(addr || '').toLowerCase())
+    .map(k => ({ createdAt: k.created_at, lastUsed: k.last_used }))
 }
 
 // ---- withdrawals (owner-signed, EIP-712) ----------------------------------
@@ -161,14 +144,15 @@ function verifyWithdraw(intent, signature, DOMAIN) {
 }
 
 function view(addr) {
-  const r = buyers.get(String(addr || '').toLowerCase())
-  if (!r) return { address: null, balance: '0.000000', keys: [], history: [] }
+  const row = stmts.getBalance.get(String(addr || '').toLowerCase())
+  if (!row) return { address: null, balance: '0.000000', keys: [], history: [] }
+  const address = ethers.getAddress(row.address)
   return {
-    address: r.address,
-    balance: ethers.formatUnits(BigInt(r.balanceAtomic || 0), 6),
-    balanceAtomic: String(r.balanceAtomic || '0'),
-    keys: listKeys(r.address),
-    history: (r.history || []).slice(-20).reverse(),
+    address,
+    balance: ethers.formatUnits(BigInt(row.balance_atomic || 0), 6),
+    balanceAtomic: String(row.balance_atomic || '0'),
+    keys: listKeys(address),
+    history: stmts.recentHistory.all(String(addr).toLowerCase(), 20).map(h => ({ type: h.type, amount: h.amount, note: h.note, at: h.t })),
   }
 }
 

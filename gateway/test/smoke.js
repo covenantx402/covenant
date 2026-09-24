@@ -98,7 +98,7 @@ async function main() {
       validAfter: String(now - 10), validBefore: String(now + 300),
       nonce: ethers.hexlify(ethers.randomBytes(32)), resource: '/x402/premium',
     }
-    const domain = { name: 'Global Dollar', version: '1', chainId: 4663, verifyingContract: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168' }
+    const domain = { name: 'TRIBUTE', version: '1', chainId: 4663, verifyingContract: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168' }
     const types = { PaymentIntent: [
       { name: 'from', type: 'address' }, { name: 'to', type: 'address' }, { name: 'value', type: 'uint256' },
       { name: 'validAfter', type: 'uint256' }, { name: 'validBefore', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }, { name: 'resource', type: 'string' },

@@ -11,6 +11,9 @@ function key() {
     .update(process.env.TRIBUTE_RPC_UPSTREAM || 'tribute-local').digest()
   return crypto.createHash('sha256').update(raw).digest()
 }
+if (!process.env.TRIBUTE_VAULT_KEY) {
+  console.warn('[vault] TRIBUTE_VAULT_KEY not set — encryption key derived from TRIBUTE_RPC_UPSTREAM. Set TRIBUTE_VAULT_KEY in production (see README Security notes).')
+}
 
 const stmts = {
   put: db.prepare('INSERT INTO vault_entries (name, enc, iv, tag, created_at, hits) VALUES (?,?,?,?,?,0) ON CONFLICT(name) DO UPDATE SET enc=excluded.enc, iv=excluded.iv, tag=excluded.tag, created_at=excluded.created_at, hits=0'),
