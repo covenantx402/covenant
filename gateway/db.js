@@ -163,6 +163,56 @@ CREATE TABLE IF NOT EXISTS ratelimit_buckets (
   bucket TEXT PRIMARY KEY,
   hits TEXT NOT NULL
 );
+
+-- Marketplace: third-party paid API listings (was marketplace.json,
+-- full-file rewrite on every hit/settle/refund — the last flat-file module
+-- in the gateway). Lower risk than balances/routes (no direct USDG here,
+-- escrow money moves through facilitator.js/settlements which were already
+-- SQLite), but same durability/perf problem under load.
+CREATE TABLE IF NOT EXISTS marketplace_listings (
+  slug TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  upstream TEXT NOT NULL,
+  price TEXT NOT NULL,
+  seller TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  delisted_at INTEGER,
+  hits INTEGER NOT NULL DEFAULT 0,
+  paid INTEGER NOT NULL DEFAULT 0,
+  failed INTEGER NOT NULL DEFAULT 0,
+  refunded INTEGER NOT NULL DEFAULT 0,
+  earned_atomic TEXT NOT NULL DEFAULT '0',
+  refunded_atomic TEXT NOT NULL DEFAULT '0',
+  lat_sum_ms INTEGER NOT NULL DEFAULT 0,
+  lat_n INTEGER NOT NULL DEFAULT 0,
+  last_latency_ms INTEGER,
+  plan_calls INTEGER,
+  plan_price TEXT,
+  plan_atomic TEXT,
+  private_headers_enc TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_marketplace_seller ON marketplace_listings(seller);
+
+CREATE TABLE IF NOT EXISTS marketplace_subs (
+  slug TEXT NOT NULL,
+  buyer TEXT NOT NULL,
+  plan_calls INTEGER NOT NULL,
+  plan_price TEXT NOT NULL,
+  atomic TEXT NOT NULL,
+  remaining INTEGER NOT NULL DEFAULT 0,
+  used INTEGER NOT NULL DEFAULT 0,
+  purchased_at INTEGER NOT NULL,
+  tx_hash TEXT,
+  PRIMARY KEY (slug, buyer)
+);
+
+CREATE TABLE IF NOT EXISTS marketplace_nonces (
+  nonce TEXT PRIMARY KEY,
+  t INTEGER NOT NULL
+);
 `)
 
 module.exports = db
