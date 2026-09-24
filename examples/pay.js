@@ -16,7 +16,7 @@ const CHAIN_ID = 4663
 
 // Must match the gateway's facilitator domain (see gateway/facilitator.js)
 const DOMAIN = {
-  name: 'Global Dollar',
+  name: 'TRIBUTE',
   version: '1',
   chainId: CHAIN_ID,
   verifyingContract: USDG,
@@ -42,7 +42,11 @@ async function main() {
   // 1. hit the paid endpoint, get the 402 requirements
   const res = await fetch(`${GATEWAY}/x402/premium`)
   if (res.status !== 402) { console.error('expected 402, got', res.status); process.exit(1) }
-  const required = JSON.parse(Buffer.from(res.headers.get('x-payment-required'), 'base64').toString())
+  // x-payment-required-v1 carries the legacy v1 JSON body this example
+  // speaks (maxAmountRequired etc). The v2 header (Payment-Required /
+  // X-PAYMENT-REQUIRED) uses a different codec + field names (`amount`) —
+  // don't parse that one as plain JSON here.
+  const required = JSON.parse(Buffer.from(res.headers.get('x-payment-required-v1'), 'base64').toString())
   const req = required.accepts[0]
   console.log('payment required:', req.description, '—', Number(req.maxAmountRequired) / 1e6, 'USDG')
 

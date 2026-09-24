@@ -105,6 +105,64 @@ CREATE TABLE IF NOT EXISTS settlements (
 );
 CREATE INDEX IF NOT EXISTS idx_settlements_t ON settlements(t DESC);
 CREATE INDEX IF NOT EXISTS idx_settlements_payer ON settlements(payer);
+
+-- Prepaid buyer balances (was JSON-file-per-mutation in balance.js — same
+-- full-rewrite cost problem the rest of this file was migrated off of, and
+-- the one ledger holding actual escrowed USDG).
+CREATE TABLE IF NOT EXISTS balances (
+  address TEXT PRIMARY KEY,
+  balance_atomic TEXT NOT NULL DEFAULT '0',
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS balance_keys (
+  hash TEXT PRIMARY KEY,
+  address TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_used INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_balance_keys_address ON balance_keys(address);
+
+CREATE TABLE IF NOT EXISTS balance_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  address TEXT NOT NULL,
+  type TEXT NOT NULL,
+  amount TEXT NOT NULL,
+  note TEXT,
+  t INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_balance_history_address ON balance_history(address, t DESC);
+
+-- Paid-route registry (was routes.json, rewritten whole-file on every 402
+-- hit via x402-routes.js log()). Same migration as above.
+CREATE TABLE IF NOT EXISTS routes (
+  slug TEXT PRIMARY KEY,
+  path TEXT NOT NULL,
+  price TEXT NOT NULL,
+  description TEXT,
+  pay_to TEXT,
+  created_at INTEGER NOT NULL,
+  hits INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS route_activity (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  t INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  slug TEXT,
+  path TEXT,
+  price TEXT,
+  status INTEGER,
+  network TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_route_activity_t ON route_activity(t DESC);
+
+-- Rate-limit buckets (was pure in-memory — reset to zero on every restart,
+-- including the 5/hour guard on the open POST /keys endpoint).
+CREATE TABLE IF NOT EXISTS ratelimit_buckets (
+  bucket TEXT PRIMARY KEY,
+  hits TEXT NOT NULL
+);
 `)
 
 module.exports = db

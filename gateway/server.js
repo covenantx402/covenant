@@ -52,9 +52,19 @@ const RATE_LIMITS = {
   DEFAULT: { limit: 300, windowMs: 60000 },
 }
 
+/* X-Forwarded-For is only trustworthy behind a KNOWN reverse proxy — anyone
+   can set that header directly and mint a fresh IP-keyed rate-limit bucket
+   on every request otherwise (defeats the 5-keys/hour guard on the open
+   POST /keys endpoint entirely). Only honour it when the immediate peer is
+   in TRIBUTE_TRUSTED_PROXIES (comma-separated IPs, e.g. your own nginx/LB). */
+const TRUSTED_PROXIES = new Set((process.env.TRIBUTE_TRUSTED_PROXIES || '').split(',').map(s => s.trim()).filter(Boolean))
 function clientIp(req) {
-  return (req.headers['x-forwarded-for'] || '').split(',')[0].trim() ||
-    req.socket?.remoteAddress || 'unknown'
+  const peer = req.socket?.remoteAddress || 'unknown'
+  if (TRUSTED_PROXIES.has(peer)) {
+    const xff = (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+    if (xff) return xff
+  }
+  return peer
 }
 
 function rateCheck(req, agentKey) {
@@ -295,16 +305,28 @@ const server = http.createServer(async (req, res) => {
      rebuilt per request from the live route + marketplace registries. */
   if (req.method === 'GET' && url === '/openapi.json') {
     const spender = facilitator.publicView().spender || process.env.TRIBUTE_X402_PAYTO || '0x0000000000000000000000000000000000000000'
+    /* Session scheme (pay once → 100 calls/1h, ~100x cheaper per call than
+       per-call payment) previously only appeared in the runtime 402 body for
+       /x402/premium — invisible to any agent/scanner discovering routes via
+       this doc, which is the documented integration path. Every paid op now
+       advertises BOTH protocols so the flagship "instant settlement, pay
+       once call many" feature is actually discoverable, not just true if
+       you already know to hit the route directly. */
+    const sessionProtocol = { scheme: 'tribute-session', network: 'eip155:4663', payTo: spender, asset: x402r.USDG, extra: { calls: 100, ttlSec: 3600 } }
     const paidOp = (slug, summary, price, extraDesc) => ({
       get: {
         operationId: 'paid_' + slug.replace(/-/g, '_'),
         summary,
-        description: extraDesc || `Pay-per-call in USDG on Robinhood Chain (eip155:4663) via x402. Unpaid GET returns a 402 challenge; settle it with POST /facilitator/settle, then replay the receipt as X-PAYMENT.`,
+        description: (extraDesc || `Pay-per-call in USDG on Robinhood Chain (eip155:4663) via x402. Unpaid GET returns a 402 challenge; settle it with POST /facilitator/settle, then replay the receipt as X-PAYMENT.`) +
+          ' High-volume agents: settle once with resource "session" (0.01 USDG = 100 calls / 1h) then POST /session/redeem per call — see x-payment-info.protocols[1].',
         tags: ['Paid APIs'],
         parameters: [{ name: 'X-PAYMENT', in: 'header', required: false, description: 'Base64 x402 receipt from POST /facilitator/settle. Omit → HTTP 402 challenge.', schema: { type: 'string' } }],
         'x-payment-info': {
           price: { mode: 'fixed', currency: 'USD', amount: String(price) },
-          protocols: [{ x402: { network: 'eip155:4663', scheme: 'exact', payTo: spender, asset: x402r.USDG } }]
+          protocols: [
+            { x402: { network: 'eip155:4663', scheme: 'exact', payTo: spender, asset: x402r.USDG } },
+            { x402: sessionProtocol },
+          ]
         },
         security: [{ x402: [] }],
         responses: {
@@ -312,7 +334,7 @@ const server = http.createServer(async (req, res) => {
             description: 'Delivered payload (application/json) once payment is settled',
             content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean' }, api: { type: 'string' }, tx: { type: 'string' }, payload: { type: 'object', additionalProperties: true } }, required: ['payload'] } } }
           },
-          '402': { description: 'Payment Required — x402 challenge in body and Payment-Required header' }
+          '402': { description: 'Payment Required — x402 challenge in body and Payment-Required header. accepts[] includes both scheme "exact" (per-call) and scheme "tribute-session" (pay once, 100 calls/1h).' }
         }
       }
     })
@@ -348,7 +370,21 @@ const server = http.createServer(async (req, res) => {
         '/x402/apis': { get: { operationId: 'list_apis', summary: 'Catalog of paid APIs + prices (free)', security: [], responses: { '200': { description: 'JSON catalog' } } } },
         '/x402/marketplace': { get: { operationId: 'list_marketplace', summary: 'Third-party marketplace listings (free)', security: [], responses: { '200': { description: 'JSON catalog' } } } },
         '/facilitator': { get: { operationId: 'facilitator_status', summary: 'Settlement config (free)', security: [], responses: { '200': { description: 'JSON status' } } } },
-        '/health': { get: { operationId: 'health', summary: 'Health check (free)', security: [], responses: { '200': { description: 'ok' } } } }
+        '/health': { get: { operationId: 'health', summary: 'Health check (free)', security: [], responses: { '200': { description: 'ok' } } } },
+        '/session/redeem': {
+          post: {
+            operationId: 'session_redeem', summary: 'Redeem one call from a paid session (no wallet interaction, no on-chain tx)',
+            description: 'Opened by settling a PaymentIntent with resource "session" against POST /facilitator/settle. Each redeem decrements the session budget server-side.',
+            security: [], responses: { '200': { description: '{ ok: true, callsRemaining }' }, '402': { description: 'session exhausted or unknown — open a new one via /facilitator/settle' } }
+          }
+        },
+        '/session/{id}': {
+          get: {
+            operationId: 'session_status', summary: 'Session status (calls used/remaining, expiry)',
+            security: [], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+            responses: { '200': { description: 'session status' }, '404': { description: 'unknown or expired' } }
+          }
+        }
       }
     })
     return
@@ -363,7 +399,7 @@ const server = http.createServer(async (req, res) => {
     send(res, 200, {
       version: 1,
       resources,
-      instructions: 'TRIBUTE x402 gateway — USDG on Robinhood Chain 4663. See /openapi.json for the canonical machine-readable contract.'
+      instructions: 'TRIBUTE x402 gateway — USDG on Robinhood Chain 4663. See /openapi.json for the canonical machine-readable contract. Every resource above accepts two payment schemes: "exact" (per-call) and "tribute-session" (settle once for 100 calls / 1h via POST /facilitator/settle {resource:"session"}, then POST /session/redeem per call — no further wallet interaction).'
     })
     return
   }
@@ -650,9 +686,10 @@ const server = http.createServer(async (req, res) => {
 
   // agent reputation (self or any address)
   if (req.method === 'GET' && url === '/reputation') {
-    const addr = (req.url.split('?')[1] || '').match(/address=(0x[0-9a-fA-F]{40})/i)?.[1] || agent?.id && null
+    const addr = (req.url.split('?')[1] || '').match(/address=(0x[0-9a-fA-F]{40})/i)?.[1] || null
     send(res, 200, {
       self: agent ? { id: agent.id, label: agent.label, hits: agent.hits, lastUsed: agent.lastUsed } : null,
+      queried: addr ? reputation.score(addr) : null,
       note: 'pass ?address=0x... to score an on-chain payer. scores are derived from settled payments, every claim anchored to a tx hash.',
       leaderboard: reputation.leaderboard(10),
     })
