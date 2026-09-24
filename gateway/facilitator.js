@@ -89,9 +89,28 @@ function usedNoncesHas(nonce) { return !!stmts.nonceGet.get(nonce) }
 // used to construct a fresh JsonRpcProvider (and Wallet) per call, so a
 // single /facilitator/settle request could spin up 3-4 separate RPC
 // connections. One provider, one wallet, reused for the process lifetime.
+//
+// RPC failover: TRIBUTE_RPC_UPSTREAM may be a comma-separated list of URLs.
+// A single flaky public RPC (seen in prod: "JsonRpcProvider failed to
+// detect network") previously meant every settlement stalled until that one
+// endpoint recovered. With >1 URL configured, ethers' FallbackProvider
+// (quorum 1 — any one healthy responder is enough, no majority-vote needed
+// for a read/write proxy like this) routes around a dead/slow endpoint
+// automatically. Single URL still works exactly as before (falls back to
+// a plain JsonRpcProvider, no FallbackProvider overhead).
 let _provider = null
 function provider() {
-  if (!_provider) _provider = new ethers.JsonRpcProvider(process.env.TRIBUTE_RPC_UPSTREAM)
+  if (_provider) return _provider
+  const urls = String(process.env.TRIBUTE_RPC_UPSTREAM || '').split(',').map(s => s.trim()).filter(Boolean)
+  if (urls.length > 1) {
+    _provider = new ethers.FallbackProvider(urls.map((u, i) => ({
+      provider: new ethers.JsonRpcProvider(u),
+      priority: i,
+      weight: 1,
+    })), undefined, { quorum: 1 })
+  } else {
+    _provider = new ethers.JsonRpcProvider(urls[0])
+  }
   return _provider
 }
 
@@ -275,9 +294,12 @@ function claimReceipt(nonce) {
 
 
 
-/** Live block probe for /x402/health — throws if the RPC is unreachable. */
+/** Live block probe for /x402/health — throws if the RPC is unreachable.
+ *  Uses the portable getBlockNumber() (works on both JsonRpcProvider and
+ *  FallbackProvider) rather than a raw .send('eth_blockNumber'), which
+ *  FallbackProvider doesn't expose. */
 async function currentBlock() {
-  return provider().send('eth_blockNumber', [])
+  return provider().getBlockNumber()
 }
 
 /**

@@ -36,7 +36,7 @@ Environment:
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `TRIBUTE_RPC_UPSTREAM` | yes | JSON-RPC URL for Robinhood Chain (e.g. `https://robinhood-rpc.publicnode.com`) |
+| `TRIBUTE_RPC_UPSTREAM` | yes | JSON-RPC URL for Robinhood Chain (e.g. `https://robinhood-rpc.publicnode.com`). Comma-separate multiple URLs for automatic failover on the settlement path (`ethers.FallbackProvider`, quorum 1) — recommended in production. |
 | `TRIBUTE_PORT` | no | Listen port (default `8792`) |
 | `TRIBUTE_SETTLE_KEY` | for settlement | Private key of the facilitator's settlement wallet (the spender agents approve) |
 | `TRIBUTE_X402_PAYTO` | no | Default recipient address for paid routes |

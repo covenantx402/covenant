@@ -21,7 +21,11 @@ const x402v2 = require('./x402-v2')
 // marketplace slugs must never collide with TRIBUTE's own paid routes
 marketplace.setReservedSlugCheck((slug) => x402r.has(slug))
 
-const UPSTREAM = process.env.TRIBUTE_RPC_UPSTREAM
+// TRIBUTE_RPC_UPSTREAM may be a comma-separated list (see facilitator.js —
+// the settlement path gets real failover via ethers.FallbackProvider). This
+// raw passthrough proxy just needs ONE URL to forward whitelisted reads to;
+// take the first configured endpoint.
+const UPSTREAM = String(process.env.TRIBUTE_RPC_UPSTREAM || '').split(',')[0].trim()
 const PORT = Number(process.env.TRIBUTE_PORT || 8792)
 /* Canonical public origin — used as the `resource` in every 402 challenge and
    in discovery docs (x402scan / CDP Bazaar). Was the placeholder tribute.re. */
