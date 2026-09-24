@@ -9,18 +9,65 @@
 // signer and require signer === seller. Revoke works the same way.
 //
 // Fee: TRIBUTE_MARKETPLACE_FEE_BPS (basis points, default 500 = 5%).
-const fs = require('fs')
-const path = require('path')
+//
+// SQLite-backed (see db.js) — was the last flat-JSON-rewrite-per-mutation
+// module in the gateway (full marketplace.json rewritten on every
+// hit/settle/refund). Public API (function signatures/return shapes)
+// unchanged from the JSON-backed version — no caller edits needed.
 const dns = require('dns')
 const http = require('http')
 const https = require('https')
 const crypto = require('crypto')
 const { URL } = require('url')
 const { ethers } = require('ethers')
+const db = require('./db')
 
 const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'
 const CHAIN_ID = 4663
 const DOMAIN = { name: 'TRIBUTE', version: '1', chainId: CHAIN_ID, verifyingContract: USDG }
+
+const stmts = {
+  insertListing: db.prepare(`INSERT INTO marketplace_listings
+    (slug, kind, name, description, upstream, price, seller, status, created_at,
+     hits, paid, failed, refunded, earned_atomic, refunded_atomic,
+     plan_calls, plan_price, plan_atomic, private_headers_enc)
+    VALUES (?,?,?,?,?,?,?,?,?, 0,0,0,0,'0','0', ?,?,?,?)`),
+  getListing: db.prepare('SELECT * FROM marketplace_listings WHERE slug = ?'),
+  hasSlug: db.prepare('SELECT 1 FROM marketplace_listings WHERE slug = ?'),
+  allActiveListings: db.prepare("SELECT * FROM marketplace_listings WHERE status = 'active'"),
+  listingsBySeller: db.prepare('SELECT * FROM marketplace_listings WHERE seller = ? COLLATE NOCASE'),
+  delist: db.prepare("UPDATE marketplace_listings SET status = 'delisted', delisted_at = ? WHERE slug = ?"),
+  bumpHits: db.prepare('UPDATE marketplace_listings SET hits = hits + 1 WHERE slug = ?'),
+  bumpFailed: db.prepare('UPDATE marketplace_listings SET failed = failed + 1 WHERE slug = ?'),
+  bumpRefund: db.prepare('UPDATE marketplace_listings SET refunded = refunded + 1, refunded_atomic = ? WHERE slug = ?'),
+  recordSettleUpd: db.prepare(`UPDATE marketplace_listings SET paid = paid + 1, earned_atomic = ?,
+    lat_sum_ms = lat_sum_ms + ?, lat_n = lat_n + ?, last_latency_ms = COALESCE(?, last_latency_ms) WHERE slug = ?`),
+
+  getSub: db.prepare('SELECT * FROM marketplace_subs WHERE slug = ? AND buyer = ?'),
+  upsertSub: db.prepare(`INSERT INTO marketplace_subs (slug, buyer, plan_calls, plan_price, atomic, remaining, used, purchased_at, tx_hash)
+    VALUES (?,?,?,?,?,?,0,?,?)
+    ON CONFLICT(slug, buyer) DO UPDATE SET remaining = excluded.remaining + marketplace_subs.remaining, tx_hash = excluded.tx_hash`),
+  setSubCounts: db.prepare('UPDATE marketplace_subs SET remaining = ?, used = ? WHERE slug = ? AND buyer = ?'),
+  subsForBuyer: db.prepare('SELECT * FROM marketplace_subs WHERE buyer = ? COLLATE NOCASE AND remaining > 0'),
+
+  nonceSeen: db.prepare('SELECT 1 FROM marketplace_nonces WHERE nonce = ?'),
+  nonceInsert: db.prepare('INSERT INTO marketplace_nonces (nonce, t) VALUES (?, ?) ON CONFLICT(nonce) DO NOTHING'),
+}
+
+function rowToListing(r) {
+  if (!r) return null
+  const rec = {
+    slug: r.slug, kind: r.kind, name: r.name, description: r.description,
+    upstream: r.upstream, price: r.price, seller: r.seller, status: r.status,
+    createdAt: r.created_at, hits: r.hits, paid: r.paid, failed: r.failed,
+    refunded: r.refunded, earnedAtomic: r.earned_atomic, refundedAtomic: r.refunded_atomic,
+    latSumMs: r.lat_sum_ms, latN: r.lat_n, lastLatencyMs: r.last_latency_ms,
+  }
+  if (r.delisted_at) rec.delistedAt = r.delisted_at
+  if (r.plan_calls != null) rec.plan = { calls: r.plan_calls, price: r.plan_price, atomic: r.plan_atomic }
+  if (r.private_headers_enc) rec.privateHeadersEnc = JSON.parse(r.private_headers_enc)
+  return rec
+}
 
 /* ---------- private upstream headers (Tahap 4) ----------
  * Sellers whose upstream needs auth (e.g. an OpenAI key behind it) attach
@@ -102,68 +149,37 @@ const SUBSCRIBE_TYPES = {
   ],
 }
 
-const STORE_PATH = process.env.TRIBUTE_MARKETPLACE_STORE ||
-  path.join(__dirname, 'data', 'marketplace.json')
 const FEE_BPS = Math.min(2000, Math.max(0, Number(process.env.TRIBUTE_MARKETPLACE_FEE_BPS ?? 500)))
 
-const listings = new Map()   // slug -> listing
-const usedNonces = new Set() // listing/revoke intent replay protection
-const subs = new Map() // Tahap 5 — `${slug}:${buyerLower}` -> { remaining, used, ... }
-
 function subKey(slug, buyer) { return String(slug) + ':' + String(buyer).toLowerCase() }
-function getSub(slug, buyer) { return subs.get(subKey(slug, buyer)) || null }
+function getSub(slug, buyer) {
+  const r = stmts.getSub.get(String(slug), String(buyer).toLowerCase())
+  if (!r) return null
+  return { slug: r.slug, buyer: r.buyer, planCalls: r.plan_calls, planPrice: r.plan_price, atomic: r.atomic, remaining: r.remaining, used: r.used, purchasedAt: r.purchased_at, txHash: r.tx_hash }
+}
 function grantSub(slug, buyer, txHash) {
-  const l = listings.get(slug)
-  if (!l || !l.plan) throw new Error('listing has no subscription plan')
-  const k = subKey(slug, buyer)
-  const rec = subs.get(k) || { slug, buyer: String(buyer).toLowerCase(), planCalls: l.plan.calls,
-    planPrice: l.plan.price, atomic: l.plan.atomic, remaining: 0, used: 0, purchasedAt: Date.now() }
-  rec.remaining += l.plan.calls // stacking allowed: buy twice, get double quota
-  rec.txHash = txHash
-  subs.set(k, rec)
-  save()
-  return rec
+  const l = stmts.getListing.get(slug)
+  if (!l || l.plan_calls == null) throw new Error('listing has no subscription plan')
+  const buyerL = String(buyer).toLowerCase()
+  stmts.upsertSub.run(slug, buyerL, l.plan_calls, l.plan_price, l.plan_atomic, l.plan_calls, Date.now(), txHash)
+  // stacking: buying twice adds quota. ON CONFLICT above adds plan_calls to
+  // existing remaining; tx_hash is overwritten to the latest purchase.
+  return getSub(slug, buyerL)
 }
 function consumeSub(slug, buyer) {
-  const s = subs.get(subKey(slug, buyer))
+  const s = stmts.getSub.get(String(slug), String(buyer).toLowerCase())
   if (!s || s.remaining <= 0) return null
-  s.remaining -= 1; s.used += 1
-  save()
-  return s
+  stmts.setSubCounts.run(s.remaining - 1, s.used + 1, slug, String(buyer).toLowerCase())
+  return { ...getSub(slug, buyer) }
 }
 function refundSub(slug, buyer) { // upstream failed after a quota call — give the call back
-  const s = subs.get(subKey(slug, buyer))
+  const s = stmts.getSub.get(String(slug), String(buyer).toLowerCase())
   if (!s) return
-  s.remaining += 1; s.used = Math.max(0, s.used - 1)
-  save()
+  stmts.setSubCounts.run(s.remaining + 1, Math.max(0, s.used - 1), slug, String(buyer).toLowerCase())
 }
 function subsView(buyer) { // for the balance card: quota buckets this buyer owns
-  const b = String(buyer).toLowerCase()
-  return [...subs.values()].filter(s => s.buyer === b && s.remaining > 0)
-    .map(s => ({ slug: s.slug, planCalls: s.planCalls, planPrice: s.planPrice, remaining: s.remaining, used: s.used, purchasedAt: s.purchasedAt }))
-}
-
-function save() {
-  try {
-    fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true })
-    const tmp = STORE_PATH + '.tmp'
-    fs.writeFileSync(tmp, JSON.stringify({
-      listings: [...listings.values()],
-      subs: [...subs.values()].slice(-2000),
-      nonces: [...usedNonces].slice(-500),
-    }))
-    fs.renameSync(tmp, STORE_PATH)
-  } catch (e) { console.error('marketplace save failed:', e.message) }
-}
-
-function load() {
-  try {
-    if (!fs.existsSync(STORE_PATH)) return
-    const data = JSON.parse(fs.readFileSync(STORE_PATH, 'utf8'))
-    for (const l of (data.listings || [])) if (l && l.slug) listings.set(l.slug, l)
-    for (const s of (data.subs || [])) if (s && s.slug && s.buyer) subs.set(subKey(s.slug, s.buyer), s)
-    for (const n of (data.nonces || [])) usedNonces.add(n)
-  } catch (e) { console.error('marketplace load failed:', e.message) }
+  return stmts.subsForBuyer.all(String(buyer).toLowerCase())
+    .map(s => ({ slug: s.slug, planCalls: s.plan_calls, planPrice: s.plan_price, remaining: s.remaining, used: s.used, purchasedAt: s.purchased_at }))
 }
 
 function slugify(s) {
@@ -172,7 +188,7 @@ function slugify(s) {
 
 function uniqueSlug(base) {
   let slug = base, i = 2
-  while (listings.has(slug) || usedSlugsExternal(slug)) slug = base + '-' + (i++)
+  while (stmts.hasSlug.get(slug) || usedSlugsExternal(slug)) slug = base + '-' + (i++)
   return slug
 }
 // route slugs shared with the x402-routes registry — filled in by server.js
@@ -224,13 +240,13 @@ async function assertSafeUpstream(rawUrl) {
 }
 
 /* ---------- listing / revoke ---------- */
-function verifyIntent(intent, signature, types, typeName) {
+function verifyIntent(intent, signature, types) {
   // `types` is the full EIP-712 types map, e.g. { ListingIntent: [...] }
   const now = Math.floor(Date.now() / 1000)
   if (!intent || typeof intent !== 'object') throw new Error('bad intent')
   if (!/^0x[0-9a-fA-F]{130,132}$/.test(String(signature || ''))) throw new Error('signature must be a 65-byte hex signature')
   if (!/^0x[0-9a-fA-F]{64}$/.test(String(intent.nonce || ''))) throw new Error('nonce must be bytes32')
-  if (usedNonces.has(intent.nonce)) throw new Error('intent nonce already used')
+  if (stmts.nonceSeen.get(intent.nonce)) throw new Error('intent nonce already used')
   const vb = BigInt(intent.validBefore || 0), va = BigInt(intent.validAfter || 0)
   if (vb <= BigInt(now)) throw new Error('intent expired')
   if (va > BigInt(now)) throw new Error('intent not yet valid')
@@ -264,7 +280,7 @@ async function createListing({ name, description, upstream, price, seller, signa
   verifyIntent({ seller, name: String(name), upstream: String(upstream), price: String(price),
     planCalls: String(planRec ? planRec.calls : 0), planPrice: planRec ? planRec.price : '0',
     validAfter: validAfter || 0, validBefore, nonce }, signature, LISTING_TYPES)
-  usedNonces.add(nonce)
+  stmts.nonceInsert.run(nonce, Date.now())
 
   const slug = uniqueSlug(slugify(name))
   // Phase-1 guard: probe the seller's endpoint once. A listing that can't
@@ -272,49 +288,33 @@ async function createListing({ name, description, upstream, price, seller, signa
   // Phase-4: the probe carries the seller's private headers, same as delivery.
   try { await fetchJson(String(upstream), 8000, 0, priv || undefined) }
   catch (e) { throw new Error(`upstream test failed — endpoint must answer GET with JSON (200): ${e.message}`) }
-  const rec = {
-    slug,
-    kind: 'external',
-    name: String(name),
-    description: description || `${name} — paid API on TRIBUTE marketplace (USDG, Robinhood 4663)`,
-    upstream: String(upstream),
-    price: String(price),
-    seller: seller,
-    status: 'active',
-    createdAt: Date.now(),
-    hits: 0,
-    paid: 0,
-    failed: 0,
-    refunded: 0,
-    earnedAtomic: '0',
-    refundedAtomic: '0',
-  }
-  if (planRec) rec.plan = planRec // Tahap 5: { calls, price, atomic } — signed by seller
-  if (priv) rec.privateHeadersEnc = encryptHeaders(priv) // encrypted at rest; never exposed
-  listings.set(slug, rec)
-  save()
+  const description2 = description || `${name} — paid API on TRIBUTE marketplace (USDG, Robinhood 4663)`
+  stmts.insertListing.run(
+    slug, 'external', String(name), description2, String(upstream), String(price), seller, 'active', Date.now(),
+    planRec ? planRec.calls : null, planRec ? planRec.price : null, planRec ? planRec.atomic : null,
+    priv ? JSON.stringify(encryptHeaders(priv)) : null,
+  )
+  const rec = rowToListing(stmts.getListing.get(slug))
   return { rec, split: { atomic: String(atomic), fee: String(fee), sellerShare: String(sellerShare) } }
 }
 
 function revoke({ slug, seller, signature, nonce, validAfter, validBefore }) {
-  const rec = listings.get(String(slug))
-  if (!rec || rec.status !== 'active') throw new Error('listing not found or already delisted')
+  const row = stmts.getListing.get(String(slug))
+  if (!row || row.status !== 'active') throw new Error('listing not found or already delisted')
   verifyIntent({ seller, slug: String(slug), validAfter: validAfter || 0, validBefore, nonce }, signature, REVOKE_TYPES)
-  usedNonces.add(nonce)
-  rec.status = 'delisted'
-  rec.delistedAt = Date.now()
-  save()
-  return rec
+  stmts.nonceInsert.run(nonce, Date.now())
+  stmts.delist.run(Date.now(), String(slug))
+  return rowToListing(stmts.getListing.get(slug))
 }
 
 /* ---------- delivery + accounting ---------- */
 function get(slug) {
-  const rec = listings.get(String(slug))
-  return rec && rec.status === 'active' ? rec : null
+  const row = stmts.getListing.get(String(slug))
+  return row && row.status === 'active' ? rowToListing(row) : null
 }
 function catalog() {
-  return [...listings.values()]
-    .filter(l => l.status === 'active')
+  return stmts.allActiveListings.all()
+    .map(rowToListing)
     .sort((a, b) => (b.paid - a.paid) || (b.createdAt - a.createdAt))
     .map(l => ({
       slug: l.slug, name: l.name, description: l.description, price: l.price,
@@ -327,31 +327,29 @@ function catalog() {
     }))
 }
 function recordHit(slug) {
-  const l = listings.get(slug)
-  if (l) { l.hits = (l.hits || 0) + 1; save() }
+  if (stmts.getListing.get(slug)) stmts.bumpHits.run(slug)
 }
 function recordFail(slug) {
-  const l = listings.get(slug)
-  if (l) { l.failed = (l.failed || 0) + 1; save() }
+  if (stmts.getListing.get(slug)) stmts.bumpFailed.run(slug)
 }
 function recordRefund(slug, { sellerShareAtomic }) {
-  const l = listings.get(slug)
-  if (!l) return
-  l.refunded = (l.refunded || 0) + 1
-  l.refundedAtomic = String(BigInt(l.refundedAtomic || 0) + BigInt(sellerShareAtomic || 0))
-  save()
+  const row = stmts.getListing.get(slug)
+  if (!row) return
+  const next = String(BigInt(row.refunded_atomic || 0) + BigInt(sellerShareAtomic || 0))
+  stmts.bumpRefund.run(next, slug)
 }
 function recordSettle(slug, { sellerShareAtomic, latencyMs }) {
-  const l = listings.get(slug)
-  if (!l) return
-  l.paid = (l.paid || 0) + 1
-  l.earnedAtomic = String(BigInt(l.earnedAtomic || 0) + BigInt(sellerShareAtomic))
-  if (Number.isFinite(latencyMs) && latencyMs >= 0) {
-    l.latSumMs = (l.latSumMs || 0) + latencyMs
-    l.latN = (l.latN || 0) + 1
-    l.lastLatencyMs = Math.round(latencyMs)
-  }
-  save()
+  const row = stmts.getListing.get(slug)
+  if (!row) return
+  const nextEarned = String(BigInt(row.earned_atomic || 0) + BigInt(sellerShareAtomic))
+  const validLat = Number.isFinite(latencyMs) && latencyMs >= 0
+  stmts.recordSettleUpd.run(
+    nextEarned,
+    validLat ? Math.round(latencyMs) : 0,
+    validLat ? 1 : 0,
+    validLat ? Math.round(latencyMs) : null,
+    slug,
+  )
 }
 /* Seller reputation: delivery success rate + average latency, from real
  * paid traffic only (delivered vs refunded). No traffic yet => null (shown as NEW). */
@@ -366,7 +364,7 @@ function reputationOf(l) {
   }
 }
 function earningsFor(seller) {
-  const mine = [...listings.values()].filter(l => l.seller.toLowerCase() === String(seller).toLowerCase())
+  const mine = stmts.listingsBySeller.all(String(seller)).map(rowToListing)
   return {
     seller,
     feeBps: FEE_BPS,
@@ -424,12 +422,10 @@ function fetchJson(urlStr, timeoutMs = 8000, depth = 0, extraHeaders) {
   })
 }
 
-load()
-
 module.exports = {
   createListing, revoke, get, catalog, recordHit, recordFail, recordRefund, recordSettle, earningsFor, reputationOf,
   fetchJson, assertSafeUpstream, splitPrice, setReservedSlugCheck, requirement,
-  getSub, grantSub, consumeSub, refundSub, subsView, subs,
+  getSub, grantSub, consumeSub, refundSub, subsView,
   privateHeadersFor: (rec) => (rec && rec.privateHeadersEnc ? decryptHeaders(rec.privateHeadersEnc) : null),
-  DOMAIN, LISTING_TYPES, REVOKE_TYPES, FEE_BPS, listings,
+  DOMAIN, LISTING_TYPES, REVOKE_TYPES, FEE_BPS,
 }
