@@ -98,4 +98,11 @@ fi
 echo "== DEPLOY OK =="
 echo "   service: active, health: ok"
 echo "   backup kept at: $BACKUP_DIR (manual rollback: copy its *.js back + systemctl restart $SERVICE)"
+
+# Record what SHA is now live, so the CD watcher (auto-deploy-watch.sh) knows
+# not to redeploy the same commit every tick.
+DEPLOYED_SHA=$(cd "$REPO_GATEWAY" && git rev-parse HEAD 2>/dev/null || echo unknown)
+mkdir -p /root/backups/tribute
+echo "$DEPLOYED_SHA" > /root/backups/tribute/.deployed_sha
+echo "   deployed sha: $DEPLOYED_SHA"
 exit 0
