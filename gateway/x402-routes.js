@@ -8,7 +8,7 @@ const db = require('./db')
 const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'
 /* Must match facilitator.js EIP-712 DOMAIN — the 402 body advertises these
    to the client so the wallet shows the same name the signature uses. */
-const DOMAIN_NAME = 'TRIBUTE'
+const DOMAIN_NAME = 'COVENANT'
 const DOMAIN_VERSION = '1'
 
 const stmts = {
@@ -105,8 +105,8 @@ function create({ path: p, price, description, payTo }) {
     slug,
     path: p,
     price: String(price),
-    description: description || `TRIBUTE paid API ${p} — USDG on Robinhood 4663`,
-    payTo: payTo || process.env.TRIBUTE_X402_PAYTO || '0x0000000000000000000000000000000000000000',
+    description: description || `COVENANT paid API ${p} — USDG on Robinhood 4663`,
+    payTo: payTo || process.env.COVENANT_X402_PAYTO || '0x0000000000000000000000000000000000000000',
     createdAt: Date.now(),
     hits: 0
   }
@@ -123,12 +123,12 @@ function bump(slug) {
 }
 
 function seed() {
-  if (process.env.TRIBUTE_SEED_ROUTES === '0') return
+  if (process.env.COVENANT_SEED_ROUTES === '0') return
   if (stmts.count.get().n > 0) return
   const defaults = [
-    { path: '/alerts', price: '0.01', description: 'TRIBUTE whale alerts — USDG on Robinhood 4663' },
-    { path: '/signals', price: '0.05', description: 'TRIBUTE agent signals — USDG on Robinhood 4663' },
-    { path: '/market-analytics', price: '0.05', description: 'TRIBUTE market analytics — liquidity, breadth, turnover rankings on Robinhood 4663' },
+    { path: '/alerts', price: '0.01', description: 'COVENANT whale alerts — USDG on Robinhood 4663' },
+    { path: '/signals', price: '0.05', description: 'COVENANT agent signals — USDG on Robinhood 4663' },
+    { path: '/market-analytics', price: '0.05', description: 'COVENANT market analytics — liquidity, breadth, turnover rankings on Robinhood 4663' },
   ]
   for (const d of defaults) {
     try { create(d) } catch { /* already present */ }

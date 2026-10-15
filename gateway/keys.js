@@ -24,7 +24,7 @@ function publicView(rec) {
 }
 
 function mint(label) {
-  const raw = 'trb_' + crypto.randomBytes(24).toString('hex')
+  const raw = 'cvn_' + crypto.randomBytes(24).toString('hex')
   const hash = crypto.createHash('sha256').update(raw).digest('hex')
   const id = crypto.randomBytes(8).toString('hex')
   const rec = {
@@ -42,7 +42,7 @@ function mint(label) {
 
 function verify(raw) {
   const token = String(raw || '').trim()
-  if (!token.startsWith('trb_')) return null
+  if (!token.startsWith('cvn_')) return null
   const hash = crypto.createHash('sha256').update(token).digest('hex')
   const rec = stmts.byHash.get(hash)
   if (!rec) return null

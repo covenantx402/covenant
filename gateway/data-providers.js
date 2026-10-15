@@ -12,7 +12,7 @@ const cache = new Map() // key -> { at, data }
 function fetchText(url, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, {
-      headers: { accept: 'application/json,text/xml', 'user-agent': 'TRIBUTE/1.0' },
+      headers: { accept: 'application/json,text/xml', 'user-agent': 'COVENANT/1.0' },
       timeout: timeoutMs,
     }, res => {
       // follow one redirect layer (RSS feeds sometimes 301)

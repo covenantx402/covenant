@@ -1,4 +1,4 @@
-// sessions.js — paid session manager for TRIBUTE (SQLite-backed).
+// sessions.js — paid session manager for COVENANT (SQLite-backed).
 // Pattern (matches Stripe MPP-style session intent):
 //   1. Agent pays once for a session (a settlement with resource = "session:<id>")
 //   2. The session grants N calls (or a TTL) against a route

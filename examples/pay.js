@@ -1,4 +1,4 @@
-// examples/pay.js — an agent client that PAYS for a resource via TRIBUTE.
+// examples/pay.js — an agent client that PAYS for a resource via COVENANT.
 //
 // Flow:
 //   1. GET the paid endpoint  → 402 + payment requirements
@@ -9,14 +9,14 @@
 // Run: node examples/pay.js <private-key-with-USDG>
 const { ethers } = require('ethers')
 
-const GATEWAY = process.env.TRIBUTE_GATEWAY || 'http://127.0.0.1:8792'
-const RPC = process.env.TRIBUTE_RPC_UPSTREAM || 'https://robinhood-rpc.publicnode.com'
+const GATEWAY = process.env.COVENANT_GATEWAY || 'http://127.0.0.1:8792'
+const RPC = process.env.COVENANT_RPC_UPSTREAM || 'https://robinhood-rpc.publicnode.com'
 const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'
 const CHAIN_ID = 4663
 
 // Must match the gateway's facilitator domain (see gateway/facilitator.js)
 const DOMAIN = {
-  name: 'TRIBUTE',
+  name: 'COVENANT',
   version: '1',
   chainId: CHAIN_ID,
   verifyingContract: USDG,

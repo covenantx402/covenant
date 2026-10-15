@@ -11,20 +11,20 @@
 // The signed intent is the server's proof-of-authorization to execute transferFrom.
 //
 // EIP-712 domain (verified on-chain via DOMAIN_SEPARATOR):
-//   name "TRIBUTE", version "1", chainId 4663, verifyingContract USDG
+//   name "COVENANT", version "1", chainId 4663, verifyingContract USDG
 //
 // NOTE: name was "Global Dollar" (the token) before. Wallets flagged that as
 // a phishing-shaped approval: the message claimed to come from the token
-// contract itself. TRIBUTE is the party asking the user to sign, so TRIBUTE
+// contract itself. COVENANT is the party asking the user to sign, so COVENANT
 // is the correct domain name. Must stay in sync with frontend
-// /root/tributex402/src/lib/pay.ts DOMAIN.
+// /root/covenantx402/src/lib/pay.ts DOMAIN.
 const { ethers } = require('ethers')
 const db = require('./db')
 
 const CHAIN_ID = 4663
 const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'
 const USDG_DECIMALS = 6
-const DOMAIN_NAME = 'TRIBUTE'
+const DOMAIN_NAME = 'COVENANT'
 const DOMAIN_VERSION = '1'
 
 const DOMAIN = {
@@ -90,7 +90,7 @@ function usedNoncesHas(nonce) { return !!stmts.nonceGet.get(nonce) }
 // single /facilitator/settle request could spin up 3-4 separate RPC
 // connections. One provider, one wallet, reused for the process lifetime.
 //
-// RPC failover: TRIBUTE_RPC_UPSTREAM may be a comma-separated list of URLs.
+// RPC failover: COVENANT_RPC_UPSTREAM may be a comma-separated list of URLs.
 // A single flaky public RPC (seen in prod: "JsonRpcProvider failed to
 // detect network") previously meant every settlement stalled until that one
 // endpoint recovered. With >1 URL configured, ethers' FallbackProvider
@@ -101,7 +101,7 @@ function usedNoncesHas(nonce) { return !!stmts.nonceGet.get(nonce) }
 let _provider = null
 function provider() {
   if (_provider) return _provider
-  const urls = String(process.env.TRIBUTE_RPC_UPSTREAM || '').split(',').map(s => s.trim()).filter(Boolean)
+  const urls = String(process.env.COVENANT_RPC_UPSTREAM || '').split(',').map(s => s.trim()).filter(Boolean)
   if (urls.length > 1) {
     _provider = new ethers.FallbackProvider(urls.map((u, i) => ({
       provider: new ethers.JsonRpcProvider(u),
@@ -116,7 +116,7 @@ function provider() {
 
 let _wallet = null
 function settlementWallet() {
-  const pk = process.env.TRIBUTE_SETTLE_KEY
+  const pk = process.env.COVENANT_SETTLE_KEY
   if (!pk) return null
   if (!_wallet) _wallet = new ethers.Wallet(pk, provider())
   return _wallet
@@ -171,7 +171,7 @@ async function verify(intent, signature) {
       'function allowance(address,address) view returns (uint256)',
     ], p)
     const spender = settlementWallet()
-    if (!spender) return { ok: false, reason: 'facilitator settlement wallet not configured (TRIBUTE_SETTLE_KEY missing)' }
+    if (!spender) return { ok: false, reason: 'facilitator settlement wallet not configured (COVENANT_SETTLE_KEY missing)' }
 
     const balance = await token.balanceOf(signer)
     if (balance < value) return { ok: false, reason: `insufficient USDG balance (${ethers.formatUnits(balance, 6)} < ${ethers.formatUnits(value, 6)})` }
