@@ -29,7 +29,7 @@ const UPSTREAM = String(process.env.COVENANT_RPC_UPSTREAM || '').split(',')[0].t
 const PORT = Number(process.env.COVENANT_PORT || 8792)
 /* Canonical public origin — used as the `resource` in every 402 challenge and
    in discovery docs (x402scan / CDP Bazaar). Was the placeholder covenant.re. */
-const PUBLIC_ORIGIN = (process.env.COVENANT_PUBLIC_ORIGIN || 'https://covenantx402.pages.dev').replace(/\/+$/, '')
+const PUBLIC_ORIGIN = (process.env.COVENANT_PUBLIC_ORIGIN || 'https://gateway.covenantx402.com').replace(/\/+$/, '')
 const ALLOW = new Set(['eth_chainId', 'eth_blockNumber', 'eth_gasPrice', 'eth_getBlockByNumber', 'net_version', 'eth_call'])
 
 if (!UPSTREAM) { console.error('COVENANT_RPC_UPSTREAM missing'); process.exit(1) }
@@ -358,7 +358,7 @@ const server = http.createServer(async (req, res) => {
         version: '2.0.0',
         description: 'A next-gen x402 distribution layer for smarter launches. Pay-per-call APIs settled in USDG on Robinhood Chain 4663 — no accounts, no API keys, payment is authentication. Serves x402 v1 (JSON body) and v2 (Payment-Required header, extensions.bazaar discovery) simultaneously on every paid route.',
         'x-guidance': 'Every /x402/api/<slug> route returns HTTP 402 with an x402 challenge until paid — GET/POST/HEAD all reach the challenge. Flow: read the 402 (v1: JSON body accepts[]; v2: decode the base64 Payment-Required header) → approve USDG to extra.spender → sign the EIP-712 PaymentIntent (domain name COVENANT, chainId 4663, verifyingContract = USDG) → POST /facilitator/settle {intent,signature} → replay the returned base64 receipt as X-PAYMENT header on the same GET. High-volume agents: settle once with resource "session" (0.01 USDG = 100 calls / 1h) then POST /session/redeem per call. Discovery catalog of routes: GET /x402/apis (free).',
-        contact: { name: 'COVENANT', url: 'https://covenantx402.com' },
+        contact: { name: 'COVENANT', url: 'https://gateway.covenantx402.com' },
         'x-discovery': { protocolVersions: [1, 2] }
       },
       servers: [{ url: PUBLIC_ORIGIN, description: 'COVENANT gateway (Robinhood Chain 4663 / USDG)' }],

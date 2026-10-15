@@ -30,7 +30,7 @@ const { close } = install(app, {
   config: {
     payTo: '0xYourAddress',
     network: 'robinhood',           // chain 4663, settles in USDG
-    facilitatorUrl: 'https://gateway.tributex402.com',
+    facilitatorUrl: 'https://gateway.covenantx402.com',
     routes: {
       'GET /premium': { price: '0.01', description: 'Premium data feed' },
     },

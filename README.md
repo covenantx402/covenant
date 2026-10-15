@@ -128,7 +128,7 @@ install(app, {
   config: {
     payTo: '0xYourAddress',
     network: 'robinhood',
-    facilitatorUrl: 'https://gateway.tributex402.com',
+    facilitatorUrl: 'https://gateway.covenantx402.com',
     routes: { 'GET /premium': { price: '0.01' } },
   },
 })
