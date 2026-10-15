@@ -1,4 +1,4 @@
-// reputation.js — agent reputation scores derived from settled TRIBUTE payments.
+// reputation.js — agent reputation scores derived from settled COVENANT payments.
 // A session/settlement history is an on-chain-grounded trust signal: an agent
 // that has paid for resources repeatedly is accountable (has skin in the game).
 // This module scores agents locally from the facilitator's settlement log;

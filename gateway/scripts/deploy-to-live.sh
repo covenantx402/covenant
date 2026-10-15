@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# TRIBUTE safe deploy: repo/gateway -> live proxy (/root/tribute/proxy).
+# COVENANT safe deploy: repo/gateway -> live proxy (/root/tribute/proxy).
 #
-# Why this exists: the OSS repo (github.com/tributelab/tribute) and the
-# live systemd service (tribute-proxy.service, running from
+# Why this exists: the OSS repo (github.com/covenantlab/covenant) and the
+# live systemd service (covenant-proxy.service, running from
 # /root/tribute/proxy) are TWO SEPARATE COPIES of the same gateway code —
 # there is no shared filesystem link, no CI/CD. A fix landed in the repo
 # does NOT reach production until someone runs this script. (This bit us
@@ -18,8 +18,8 @@ set -u
 
 REPO_GATEWAY=/root/tribute/repo/gateway
 LIVE_DIR=/root/tribute/proxy
-BACKUP_DIR="/root/tribute-proxy-backup-$(date -u +%Y%m%d-%H%M%S)"
-SERVICE=tribute-proxy
+BACKUP_DIR="/root/covenant-proxy-backup-$(date -u +%Y%m%d-%H%M%S)"
+SERVICE=covenant-proxy
 HEALTH_URL="http://127.0.0.1:8792/x402/health"
 
 # Files that make up the running gateway. data/ and .env are deliberately
@@ -28,7 +28,7 @@ FILES=(server.js facilitator.js agent-vault.js x402-routes.js balance.js
        ratelimit.js db.js x402-v2.js sessions.js reputation.js wallets.js
        keys.js marketplace.js data-providers.js article-extract.js)
 
-echo "== TRIBUTE deploy: repo -> live =="
+echo "== COVENANT deploy: repo -> live =="
 
 # 1. Pre-flight: repo gateway must pass its own test suite before it ships.
 echo "-- running gateway test suite in repo --"
@@ -102,7 +102,7 @@ echo "   backup kept at: $BACKUP_DIR (manual rollback: copy its *.js back + syst
 # Record what SHA is now live, so the CD watcher (auto-deploy-watch.sh) knows
 # not to redeploy the same commit every tick.
 DEPLOYED_SHA=$(cd "$REPO_GATEWAY" && git rev-parse HEAD 2>/dev/null || echo unknown)
-mkdir -p /root/backups/tribute
-echo "$DEPLOYED_SHA" > /root/backups/tribute/.deployed_sha
+mkdir -p /root/backups/covenant
+echo "$DEPLOYED_SHA" > /root/backups/covenant/.deployed_sha
 echo "   deployed sha: $DEPLOYED_SHA"
 exit 0

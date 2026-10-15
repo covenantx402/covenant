@@ -4,7 +4,7 @@
 const { ethers } = require('ethers')
 const fs = require('fs')
 
-for (const l of fs.readFileSync('/root/tribute/proxy/.env', 'utf8').split('\n')) {
+for (const l of fs.readFileSync('/root/covenant/proxy/.env', 'utf8').split('\n')) {
   const m = l.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/)
   if (m) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '')
 }
@@ -28,12 +28,12 @@ async function getJson(path, headers) {
   const gp = (await p.getFeeData()).gasPrice
 
   let fac = null
-  if (process.env.TRIBUTE_SETTLE_KEY) {
-    fac = new ethers.Wallet(process.env.TRIBUTE_SETTLE_KEY, p)
+  if (process.env.COVENANT_SETTLE_KEY) {
+    fac = new ethers.Wallet(process.env.COVENANT_SETTLE_KEY, p)
   }
 
   console.log('')
-  console.log('  TRIBUTE gateway health')
+  console.log('  COVENANT gateway health')
   console.log('  ' + '─'.repeat(58))
 
   // 1. RPC
@@ -84,7 +84,7 @@ async function getJson(path, headers) {
   }
 
   // 4. agent key (kalau ada)
-  const keyPath = '/root/tribute/proxy/.demo_key'
+  const keyPath = '/root/covenant/proxy/.demo_key'
   if (fs.existsSync(keyPath)) {
     const secret = fs.readFileSync(keyPath, 'utf8').trim()
     const an = await getJson('/analytics/keys', { Authorization: 'Bearer ' + secret })
@@ -95,7 +95,7 @@ async function getJson(path, headers) {
   }
 
   // 5. wallet demo (kalau ada)
-  const wPath = '/root/tribute/proxy/.demo_wallet'
+  const wPath = '/root/covenant/proxy/.demo_wallet'
   if (fs.existsSync(wPath)) {
     const txt = fs.readFileSync(wPath, 'utf8')
     const addr = (txt.match(/DEMO_WALLET_ADDRESS=(\S+)/) || [])[1]

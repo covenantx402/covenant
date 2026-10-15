@@ -1,4 +1,4 @@
-// Generate REAL load on the TRIBUTE gateway — every iteration is a genuine
+// Generate REAL load on the COVENANT gateway — every iteration is a genuine
 // on-chain settlement, not synthetic data. Useful before a live demo so the
 // charts and activity feed are populated with verifiable transactions.
 //
@@ -7,11 +7,11 @@
 //   PAYER_KEY=0x... node test/gen-load.js 8 3000
 const { ethers } = require('ethers')
 const fs = require('fs')
-for (const l of fs.readFileSync('/root/tribute/proxy/.env', 'utf8').split('\n')) {
+for (const l of fs.readFileSync('/root/covenant/proxy/.env', 'utf8').split('\n')) {
   const m = l.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/)
   if (m) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '')
 }
-const F = require('/root/tribute/proxy/facilitator.js')
+const F = require('/root/covenant/proxy/facilitator.js')
 
 const RPC = 'https://robinhood-rpc.publicnode.com'
 const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'

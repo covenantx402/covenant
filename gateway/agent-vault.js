@@ -7,12 +7,12 @@ const crypto = require('crypto')
 const db = require('./db')
 
 function key() {
-  const raw = process.env.TRIBUTE_VAULT_KEY || crypto.createHash('sha256')
-    .update(process.env.TRIBUTE_RPC_UPSTREAM || 'tribute-local').digest()
+  const raw = process.env.COVENANT_VAULT_KEY || crypto.createHash('sha256')
+    .update(process.env.COVENANT_RPC_UPSTREAM || 'covenant-local').digest()
   return crypto.createHash('sha256').update(raw).digest()
 }
-if (!process.env.TRIBUTE_VAULT_KEY) {
-  console.warn('[vault] TRIBUTE_VAULT_KEY not set — encryption key derived from TRIBUTE_RPC_UPSTREAM. Set TRIBUTE_VAULT_KEY in production (see README Security notes).')
+if (!process.env.COVENANT_VAULT_KEY) {
+  console.warn('[vault] COVENANT_VAULT_KEY not set — encryption key derived from COVENANT_RPC_UPSTREAM. Set COVENANT_VAULT_KEY in production (see README Security notes).')
 }
 
 const stmts = {

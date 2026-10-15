@@ -2,11 +2,11 @@
 // approve -> sign EIP-712 -> /facilitator/settle -> replay X-PAYMENT
 const { ethers } = require('ethers')
 const fs = require('fs')
-for (const l of fs.readFileSync('/root/tribute/proxy/.env', 'utf8').split('\n')) {
+for (const l of fs.readFileSync('/root/covenant/proxy/.env', 'utf8').split('\n')) {
   const m = l.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/)
   if (m) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '')
 }
-const F = require('/root/tribute/proxy/facilitator.js')
+const F = require('/root/covenant/proxy/facilitator.js')
 
 const RPC = 'https://robinhood-rpc.publicnode.com'
 const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'
@@ -76,7 +76,7 @@ async function api(path, init) {
   }
 
   // ── STEP 3: sign EIP-712 ─────────────────────────────────────────────
-  hr('STEP 3 — sign EIP-712 PaymentIntent (domain TRIBUTE)')
+  hr('STEP 3 — sign EIP-712 PaymentIntent (domain COVENANT)')
   const now = Math.floor(Date.now() / 1000)
   const intent = {
     from: w.address,
@@ -120,7 +120,7 @@ async function api(path, init) {
   // verifikasi tx on-chain
   const rc = await p.getTransactionReceipt(r4.json.transaction)
   line('  on-chain block  : ' + rc.blockNumber + ' | status: ' + (rc.status === 1 ? 'SUCCESS' : 'FAILED'))
-  line('  explorer        : https://explorer.tribute.re/tx/' + r4.json.transaction)
+  line('  explorer        : https://explorer.covenant.re/tx/' + r4.json.transaction)
 
   // ── STEP 5: replay X-PAYMENT ─────────────────────────────────────────
   hr('STEP 5 — GET with X-PAYMENT  (expect 200)')
@@ -144,7 +144,7 @@ async function api(path, init) {
   hr('HASIL')
   line('  ✓ 402 challenge')
   line('  ✓ approve on-chain')
-  line('  ✓ EIP-712 signature (domain TRIBUTE)')
+  line('  ✓ EIP-712 signature (domain COVENANT)')
   line('  ✓ settle on-chain — tx ' + r4.json.transaction.slice(0, 20) + '…')
   line('  ✓ X-PAYMENT replay → 200')
   line('  ✓ replay attack ditolak')

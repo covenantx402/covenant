@@ -1,14 +1,14 @@
-// marketplace.js — third-party paid APIs on the TRIBUTE x402 gateway.
+// marketplace.js — third-party paid APIs on the COVENANT x402 gateway.
 //
 // Anyone with a wallet can LIST their JSON API here. Buyers pay per call in
-// USDG (same 402 → sign → settle flow as TRIBUTE's own routes). Settlement is
-// split server-side: seller gets (price - fee), TRIBUTE keeps the fee.
+// USDG (same 402 → sign → settle flow as COVENANT's own routes). Settlement is
+// split server-side: seller gets (price - fee), COVENANT keeps the fee.
 //
 // Listing authority is proven cryptographically, not with an account system:
 // the seller signs an EIP-712 ListingIntent with their wallet; we recover the
 // signer and require signer === seller. Revoke works the same way.
 //
-// Fee: TRIBUTE_MARKETPLACE_FEE_BPS (basis points, default 500 = 5%).
+// Fee: COVENANT_MARKETPLACE_FEE_BPS (basis points, default 500 = 5%).
 //
 // SQLite-backed (see db.js) — was the last flat-JSON-rewrite-per-mutation
 // module in the gateway (full marketplace.json rewritten on every
@@ -24,7 +24,7 @@ const db = require('./db')
 
 const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'
 const CHAIN_ID = 4663
-const DOMAIN = { name: 'TRIBUTE', version: '1', chainId: CHAIN_ID, verifyingContract: USDG }
+const DOMAIN = { name: 'COVENANT', version: '1', chainId: CHAIN_ID, verifyingContract: USDG }
 
 const stmts = {
   insertListing: db.prepare(`INSERT INTO marketplace_listings
@@ -76,8 +76,8 @@ function rowToListing(r) {
  * never appears in the catalog, and are only ever injected into the seller's
  * own upstream request at delivery time. */
 function headerKey() {
-  const raw = process.env.TRIBUTE_MARKETPLACE_HEADER_KEY ||
-    crypto.createHash('sha256').update('tribute-marketplace-headers:' + (process.env.TRIBUTE_VAULT_KEY || process.env.TRIBUTE_RPC_UPSTREAM || 'tribute-local')).digest()
+  const raw = process.env.COVENANT_MARKETPLACE_HEADER_KEY ||
+    crypto.createHash('sha256').update('covenant-marketplace-headers:' + (process.env.COVENANT_VAULT_KEY || process.env.COVENANT_RPC_UPSTREAM || 'covenant-local')).digest()
   return crypto.createHash('sha256').update(raw).digest()
 }
 function encryptHeaders(obj) {
@@ -149,7 +149,7 @@ const SUBSCRIBE_TYPES = {
   ],
 }
 
-const FEE_BPS = Math.min(2000, Math.max(0, Number(process.env.TRIBUTE_MARKETPLACE_FEE_BPS ?? 500)))
+const FEE_BPS = Math.min(2000, Math.max(0, Number(process.env.COVENANT_MARKETPLACE_FEE_BPS ?? 500)))
 
 function subKey(slug, buyer) { return String(slug) + ':' + String(buyer).toLowerCase() }
 function getSub(slug, buyer) {
@@ -224,7 +224,7 @@ function isPrivateIp(ip) {
 async function assertSafeUpstream(rawUrl) {
   let u
   try { u = new URL(rawUrl) } catch { throw new Error('upstream must be a valid URL') }
-  const loopbackOk = process.env.TRIBUTE_ALLOW_LOOPBACK_UPSTREAM === '1' // staging tests only
+  const loopbackOk = process.env.COVENANT_ALLOW_LOOPBACK_UPSTREAM === '1' // staging tests only
   if (u.protocol !== 'https:' && !(loopbackOk && u.protocol === 'http:' && /^(127\.|::1|localhost)/.test(u.hostname))) throw new Error('upstream must be https')
   if (u.username || u.password) throw new Error('upstream URL must not embed credentials')
   const host = u.hostname
@@ -288,7 +288,7 @@ async function createListing({ name, description, upstream, price, seller, signa
   // Phase-4: the probe carries the seller's private headers, same as delivery.
   try { await fetchJson(String(upstream), 8000, 0, priv || undefined) }
   catch (e) { throw new Error(`upstream test failed — endpoint must answer GET with JSON (200): ${e.message}`) }
-  const description2 = description || `${name} — paid API on TRIBUTE marketplace (USDG, Robinhood 4663)`
+  const description2 = description || `${name} — paid API on COVENANT marketplace (USDG, Robinhood 4663)`
   stmts.insertListing.run(
     slug, 'external', String(name), description2, String(upstream), String(price), seller, 'active', Date.now(),
     planRec ? planRec.calls : null, planRec ? planRec.price : null, planRec ? planRec.atomic : null,
@@ -402,7 +402,7 @@ function requirement(rec, resource, spender) {
 function fetchJson(urlStr, timeoutMs = 8000, depth = 0, extraHeaders) {
   return new Promise((resolve, reject) => {
     const lib = String(urlStr).startsWith('http:') ? http : https
-    const headers = { accept: 'application/json', 'user-agent': 'TRIBUTE-marketplace/1.0', ...(extraHeaders || {}) }
+    const headers = { accept: 'application/json', 'user-agent': 'COVENANT-marketplace/1.0', ...(extraHeaders || {}) }
     lib.get(urlStr, { headers, timeout: timeoutMs }, res => {
       if (res.statusCode >= 301 && res.statusCode <= 308 && res.headers.location && depth < 2) {
         res.resume()

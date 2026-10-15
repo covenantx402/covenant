@@ -1,13 +1,13 @@
 // x402 Protocol v2 adapter — dual-mode with legacy v1.
 //
-// TRIBUTE's routes historically emitted v1-only PaymentRequired bodies
+// COVENANT's routes historically emitted v1-only PaymentRequired bodies
 // (`maxAmountRequired`, JSON-body challenge). The ecosystem moved to v2 in
 // Dec 2025: challenge now travels in a base64 `PAYMENT-REQUIRED` header,
 // price field renamed `maxAmountRequired` -> `amount`, and discovery is a
 // first-class `extensions.bazaar` block instead of an OpenAPI-only hack.
 //
 // This module builds a v2-shaped PaymentRequired object from the same route
-// data TRIBUTE already tracks, and encodes it with the official
+// data COVENANT already tracks, and encodes it with the official
 // `@x402/core` codec so third-party clients/scanners that only read the v2
 // header get a byte-for-byte spec-compliant payload. v1 emission in
 // server.js is untouched — every 402 response now carries BOTH transports.

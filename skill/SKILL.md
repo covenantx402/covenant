@@ -1,43 +1,43 @@
 ---
-name: tribute-x402
-description: Pay for and monetize agent APIs with USDG on Robinhood Chain 4663 via TRIBUTE. Use when an agent needs to call paid endpoints, store secrets safely, or serve paid APIs.
+name: covenant-x402
+description: Pay for and monetize agent APIs with USDG on Robinhood Chain 4663 via COVENANT. Use when an agent needs to call paid endpoints, store secrets safely, or serve paid APIs.
 version: 1.0.0
 ---
 
-# TRIBUTE — x402 v2 payments + vault for agents (Robinhood Chain 4663)
+# COVENANT — x402 v2 payments + vault for agents (Robinhood Chain 4663)
 
-Huge update coming next week: TRIBUTE payment rails for agents, with paid endpoints in USDG over x402 v2 and instant settlement on Robinhood Chain. The same gateway brokers agent credentials through a live vault so models can use secrets without seeing them — model-proof by design. Open source, MIT.
+Huge update coming next week: COVENANT payment rails for agents, with paid endpoints in USDG over x402 v2 and instant settlement on Robinhood Chain. The same gateway brokers agent credentials through a live vault so models can use secrets without seeing them — model-proof by design. Open source, MIT.
 
-TRIBUTE gives you three things:
+COVENANT gives you three things:
 
 1. **Payments** — call paid endpoints; price is settled in USDG on-chain.
 2. **Vault** — store secrets by name. Never put real credentials in prompts; reference them as `{{name}}`.
 3. **Wallets** — get a dedicated on-chain wallet for your agent identity.
 
-Base URL: `http://127.0.0.1:8792` (self-hosted gateway) — override with `TRIBUTE_GATEWAY`.
+Base URL: `http://127.0.0.1:8792` (self-hosted gateway) — override with `COVENANT_GATEWAY`.
 
 ## 1. Get an API key (one time)
 
 ```bash
-curl -s -X POST $TRIBUTE_GATEWAY/keys -H 'content-type: application/json' \
+curl -s -X POST $COVENANT_GATEWAY/keys -H 'content-type: application/json' \
   -d '{"label":"my-agent"}'
 ```
 
-Response contains `key: "trb_..."` — **shown once, save it**. Send it as `Authorization: Bearer ***` on every authenticated call.
+Response contains `key: "cvn_..."` — **shown once, save it**. Send it as `Authorization: Bearer ***` on every authenticated call.
 
 ## 2. Store a secret in the vault (never in your context)
 
 ```bash
-curl -s -X POST $TRIBUTE_GATEWAY/vault/entries \
-  -H "Authorization: Bearer trb_..." -H 'content-type: application/json' \
+curl -s -X POST $COVENANT_GATEWAY/vault/entries \
+  -H "Authorization: Bearer cvn_..." -H 'content-type: application/json' \
   -d '{"name":"llm_api_key","value":"sk-..."}'
 ```
 
 To USE a secret without seeing it, send text containing `{{llm_api_key}}` to the broker — the gateway substitutes it server-side and scrubs it from the response:
 
 ```bash
-curl -s -X POST $TRIBUTE_GATEWAY/vault/broker \
-  -H "Authorization: Bearer trb_..." -H 'content-type: application/json' \
+curl -s -X POST $COVENANT_GATEWAY/vault/broker \
+  -H "Authorization: Bearer cvn_..." -H 'content-type: application/json' \
   -d '{"text":"{\"model\":\"gpt\",\"api_key\":\"{{llm_api_key}}\",\"prompt\":\"hi\"}"}'
 ```
 
@@ -46,8 +46,8 @@ You receive the resolved request body with the secret already replaced and any r
 ## 3. Get an agent wallet
 
 ```bash
-curl -s -X POST $TRIBUTE_GATEWAY/wallets/create \
-  -H "Authorization: Bearer trb_..." -H 'content-type: application/json' \
+curl -s -X POST $COVENANT_GATEWAY/wallets/create \
+  -H "Authorization: Bearer cvn_..." -H 'content-type: application/json' \
   -d '{"label":"my-agent"}'
 ```
 
@@ -58,7 +58,7 @@ Returns address + private key **once** (encrypted copy stays in the vault). Fund
 Step 1 — unpaid call returns `402` with requirements:
 
 ```bash
-curl -si $TRIBUTE_GATEWAY/x402/premium
+curl -si $COVENANT_GATEWAY/x402/premium
 # header X-PAYMENT-REQUIRED (base64 JSON) → { accepts: [{ maxAmountRequired, payTo, asset, extra: { spender } }] }
 ```
 
@@ -68,7 +68,7 @@ Step 2 — approve the spender once (see `examples/pay.js` for full code):
 usdg.approve(spender, maxAmountRequired)  // USDG: 0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168, chain 4663
 ```
 
-Step 3 — sign an EIP-712 `PaymentIntent` in domain `{ name: "TRIBUTE", version: "1", chainId: 4663, verifyingContract: USDG }`:
+Step 3 — sign an EIP-712 `PaymentIntent` in domain `{ name: "COVENANT", version: "1", chainId: 4663, verifyingContract: USDG }`:
 
 ```js
 { from, to: payTo, value: maxAmountRequired, validAfter, validBefore, nonce, resource }
@@ -77,7 +77,7 @@ Step 3 — sign an EIP-712 `PaymentIntent` in domain `{ name: "TRIBUTE", version
 Step 4 — settle and receive the resource:
 
 ```bash
-curl -s -X POST $TRIBUTE_GATEWAY/facilitator/settle \
+curl -s -X POST $COVENANT_GATEWAY/facilitator/settle \
   -H 'content-type: application/json' \
   -d '{"intent":{...},"signature":"0x..."}'
 # → { success: true, transaction: "0x..." }
@@ -88,7 +88,7 @@ curl -s -X POST $TRIBUTE_GATEWAY/facilitator/settle \
 Instead of paying per request, settle once with `resource: "session"`:
 
 ```bash
-curl -s -X POST $TRIBUTE_GATEWAY/facilitator/settle \
+curl -s -X POST $COVENANT_GATEWAY/facilitator/settle \
   -H 'content-type: application/json' \
   -d '{"intent":{...,"resource":"session"},"signature":"0x...","extra":{"calls":100,"ttlSec":3600}}'
 # → { success: true, transaction: "0x...", session: { id: "...", callsMax: 100 } }
@@ -97,7 +97,7 @@ curl -s -X POST $TRIBUTE_GATEWAY/facilitator/settle \
 Then redeem per call — the gateway checks budget/TTL, no on-chain tx needed:
 
 ```bash
-curl -s -X POST $TRIBUTE_GATEWAY/session/redeem -d '{"sessionId":"..."}'
+curl -s -X POST $COVENANT_GATEWAY/session/redeem -d '{"sessionId":"..."}'
 ```
 
 ## 6. Reputation
@@ -105,7 +105,7 @@ curl -s -X POST $TRIBUTE_GATEWAY/session/redeem -d '{"sessionId":"..."}'
 Your agent's settled payments build an on-chain-anchored reputation score:
 
 ```bash
-curl -s $TRIBUTE_GATEWAY/reputation/0xYOUR_AGENT_WALLET
+curl -s $COVENANT_GATEWAY/reputation/0xYOUR_AGENT_WALLET
 # → { score: 42, tier: "established", settledCount: 8, txHashes: [...] }
 ```
 

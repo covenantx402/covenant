@@ -20,7 +20,7 @@
     </g>
     <circle cx="68" cy="106" r="12" fill="#fff"/>
   </g>
-  <text x="600" y="400" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="88" font-weight="800" fill="#ffffff" letter-spacing="6">TRIBUTE</text>
+  <text x="600" y="400" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="88" font-weight="800" fill="#ffffff" letter-spacing="6">COVENANT</text>
   <text x="600" y="455" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="30" fill="#1ecb74" letter-spacing="2">x402 payment rails + agent infrastructure · Robinhood Chain 4663</text>
   <text x="600" y="560" text-anchor="middle" font-family="ui-monospace, Menlo, monospace" font-size="22" fill="#5f7a6b">github.com/tributelab/tribute</text>
 </svg>

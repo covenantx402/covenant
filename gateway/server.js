@@ -1,4 +1,4 @@
-// tribute-rpc-proxy — x402 gateway for AI agents on Robinhood Chain 4663.
+// covenant-rpc-proxy — x402 gateway for AI agents on Robinhood Chain 4663.
 // Read-only RPC whitelist + x402 paid routes + agent credential vault + on-chain settlement.
 // Never forwards arbitrary RPC methods; upstream RPC comes from env, never shipped to clients.
 const http = require('http')
@@ -18,23 +18,23 @@ const sessions = require('./sessions')
 const reputation = require('./reputation')
 const x402v2 = require('./x402-v2')
 
-// marketplace slugs must never collide with TRIBUTE's own paid routes
+// marketplace slugs must never collide with COVENANT's own paid routes
 marketplace.setReservedSlugCheck((slug) => x402r.has(slug))
 
-// TRIBUTE_RPC_UPSTREAM may be a comma-separated list (see facilitator.js —
+// COVENANT_RPC_UPSTREAM may be a comma-separated list (see facilitator.js —
 // the settlement path gets real failover via ethers.FallbackProvider). This
 // raw passthrough proxy just needs ONE URL to forward whitelisted reads to;
 // take the first configured endpoint.
-const UPSTREAM = String(process.env.TRIBUTE_RPC_UPSTREAM || '').split(',')[0].trim()
-const PORT = Number(process.env.TRIBUTE_PORT || 8792)
+const UPSTREAM = String(process.env.COVENANT_RPC_UPSTREAM || '').split(',')[0].trim()
+const PORT = Number(process.env.COVENANT_PORT || 8792)
 /* Canonical public origin — used as the `resource` in every 402 challenge and
-   in discovery docs (x402scan / CDP Bazaar). Was the placeholder tribute.re. */
-const PUBLIC_ORIGIN = (process.env.TRIBUTE_PUBLIC_ORIGIN || 'https://api-gw.tributex402.com').replace(/\/+$/, '')
+   in discovery docs (x402scan / CDP Bazaar). Was the placeholder covenant.re. */
+const PUBLIC_ORIGIN = (process.env.COVENANT_PUBLIC_ORIGIN || 'https://covenantx402.pages.dev').replace(/\/+$/, '')
 const ALLOW = new Set(['eth_chainId', 'eth_blockNumber', 'eth_gasPrice', 'eth_getBlockByNumber', 'net_version', 'eth_call'])
 
-if (!UPSTREAM) { console.error('TRIBUTE_RPC_UPSTREAM missing'); process.exit(1) }
+if (!UPSTREAM) { console.error('COVENANT_RPC_UPSTREAM missing'); process.exit(1) }
 
-// Endpoints that require an agent API key (Authorization: Bearer trb_...).
+// Endpoints that require an agent API key (Authorization: Bearer cvn_...).
 const AUTH_REQUIRED = new Set([
   'POST /vault/entries', 'DELETE /vault/entries', 'GET /vault/entries', 'POST /vault/broker',
   'POST /wallets/create', 'GET /wallets',
@@ -60,8 +60,8 @@ const RATE_LIMITS = {
    can set that header directly and mint a fresh IP-keyed rate-limit bucket
    on every request otherwise (defeats the 5-keys/hour guard on the open
    POST /keys endpoint entirely). Only honour it when the immediate peer is
-   in TRIBUTE_TRUSTED_PROXIES (comma-separated IPs, e.g. your own nginx/LB). */
-const TRUSTED_PROXIES = new Set((process.env.TRIBUTE_TRUSTED_PROXIES || '').split(',').map(s => s.trim()).filter(Boolean))
+   in COVENANT_TRUSTED_PROXIES (comma-separated IPs, e.g. your own nginx/LB). */
+const TRUSTED_PROXIES = new Set((process.env.COVENANT_TRUSTED_PROXIES || '').split(',').map(s => s.trim()).filter(Boolean))
 function clientIp(req) {
   const peer = req.socket?.remoteAddress || 'unknown'
   if (TRUSTED_PROXIES.has(peer)) {
@@ -114,7 +114,7 @@ function send402(res, body) {
         description: first.description,
         mimeType: first.mimeType || 'application/json',
         accepts: v1Accepts.map(a => x402v2.acceptV2({
-          scheme: a.scheme === 'tribute-session' ? a.scheme : 'exact',
+          scheme: a.scheme === 'covenant-session' ? a.scheme : 'exact',
           network: a.network,
           amount: a.maxAmountRequired,
           payTo: a.payTo,
@@ -136,11 +136,11 @@ function send402(res, body) {
 }
 
 /* Receipt check that also honours intents signed against the old placeholder
-   resource origin (https://tribute.re) so in-flight sessions/receipts keep
+   resource origin (https://covenant.re) so in-flight sessions/receipts keep
    working after the canonical-origin switch. */
 function paidFor(header, resource) {
   return facilitator.paymentRecordFor(header, resource) ||
-    facilitator.paymentRecordFor(header, resource.replace(PUBLIC_ORIGIN, 'https://tribute.re'))
+    facilitator.paymentRecordFor(header, resource.replace(PUBLIC_ORIGIN, 'https://covenant.re'))
 }
 
 /* Marketplace fee split, derived SERVER-SIDE from the payment intent's
@@ -223,7 +223,7 @@ async function deliverByKey(res, slug, mkt, rec, owner, priceAtomic, sub) {
     })
     return
   }
-  // TRIBUTE's own route, paid from balance
+  // COVENANT's own route, paid from balance
   let payload = null
   try { payload = await dataProviders.payloadFor(rec.slug) } catch (e) {
     console.error('payload fetch failed for', rec.slug, e.message)
@@ -308,7 +308,7 @@ const server = http.createServer(async (req, res) => {
      "security": [] so the scanner doesn't probe them. Resources are dynamic —
      rebuilt per request from the live route + marketplace registries. */
   if (req.method === 'GET' && url === '/openapi.json') {
-    const spender = facilitator.publicView().spender || process.env.TRIBUTE_X402_PAYTO || '0x0000000000000000000000000000000000000000'
+    const spender = facilitator.publicView().spender || process.env.COVENANT_X402_PAYTO || '0x0000000000000000000000000000000000000000'
     /* Session scheme (pay once → 100 calls/1h, ~100x cheaper per call than
        per-call payment) previously only appeared in the runtime 402 body for
        /x402/premium — invisible to any agent/scanner discovering routes via
@@ -316,7 +316,7 @@ const server = http.createServer(async (req, res) => {
        advertises BOTH protocols so the flagship "instant settlement, pay
        once call many" feature is actually discoverable, not just true if
        you already know to hit the route directly. */
-    const sessionProtocol = { scheme: 'tribute-session', network: 'eip155:4663', payTo: spender, asset: x402r.USDG, extra: { calls: 100, ttlSec: 3600 } }
+    const sessionProtocol = { scheme: 'covenant-session', network: 'eip155:4663', payTo: spender, asset: x402r.USDG, extra: { calls: 100, ttlSec: 3600 } }
     const paidOp = (slug, summary, price, extraDesc) => ({
       get: {
         operationId: 'paid_' + slug.replace(/-/g, '_'),
@@ -338,7 +338,7 @@ const server = http.createServer(async (req, res) => {
             description: 'Delivered payload (application/json) once payment is settled',
             content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean' }, api: { type: 'string' }, tx: { type: 'string' }, payload: { type: 'object', additionalProperties: true } }, required: ['payload'] } } }
           },
-          '402': { description: 'Payment Required — x402 challenge in body and Payment-Required header. accepts[] includes both scheme "exact" (per-call) and scheme "tribute-session" (pay once, 100 calls/1h).' }
+          '402': { description: 'Payment Required — x402 challenge in body and Payment-Required header. accepts[] includes both scheme "exact" (per-call) and scheme "covenant-session" (pay once, 100 calls/1h).' }
         }
       }
     })
@@ -350,18 +350,18 @@ const server = http.createServer(async (req, res) => {
       paths['/x402/api/' + l.slug] = paidOp(l.slug, l.description || l.name, l.price,
         `Marketplace listing by ${l.seller}. ${l.description || l.name} Pay-per-call in USDG on Robinhood Chain (eip155:4663) via x402.`)
     }
-    paths['/x402/premium'] = paidOp('premium', 'TRIBUTE premium alert sample — 0.01 USDG (also opens a 100-call session option)', '0.01')
+    paths['/x402/premium'] = paidOp('premium', 'COVENANT premium alert sample — 0.01 USDG (also opens a 100-call session option)', '0.01')
     send(res, 200, {
       openapi: '3.1.0',
       info: {
-        title: 'TRIBUTE x402 Gateway',
+        title: 'COVENANT x402 Gateway',
         version: '2.0.0',
         description: 'A next-gen x402 distribution layer for smarter launches. Pay-per-call APIs settled in USDG on Robinhood Chain 4663 — no accounts, no API keys, payment is authentication. Serves x402 v1 (JSON body) and v2 (Payment-Required header, extensions.bazaar discovery) simultaneously on every paid route.',
-        'x-guidance': 'Every /x402/api/<slug> route returns HTTP 402 with an x402 challenge until paid — GET/POST/HEAD all reach the challenge. Flow: read the 402 (v1: JSON body accepts[]; v2: decode the base64 Payment-Required header) → approve USDG to extra.spender → sign the EIP-712 PaymentIntent (domain name TRIBUTE, chainId 4663, verifyingContract = USDG) → POST /facilitator/settle {intent,signature} → replay the returned base64 receipt as X-PAYMENT header on the same GET. High-volume agents: settle once with resource "session" (0.01 USDG = 100 calls / 1h) then POST /session/redeem per call. Discovery catalog of routes: GET /x402/apis (free).',
-        contact: { name: 'TRIBUTE', url: 'https://tributex402.com' },
+        'x-guidance': 'Every /x402/api/<slug> route returns HTTP 402 with an x402 challenge until paid — GET/POST/HEAD all reach the challenge. Flow: read the 402 (v1: JSON body accepts[]; v2: decode the base64 Payment-Required header) → approve USDG to extra.spender → sign the EIP-712 PaymentIntent (domain name COVENANT, chainId 4663, verifyingContract = USDG) → POST /facilitator/settle {intent,signature} → replay the returned base64 receipt as X-PAYMENT header on the same GET. High-volume agents: settle once with resource "session" (0.01 USDG = 100 calls / 1h) then POST /session/redeem per call. Discovery catalog of routes: GET /x402/apis (free).',
+        contact: { name: 'COVENANT', url: 'https://covenantx402.com' },
         'x-discovery': { protocolVersions: [1, 2] }
       },
-      servers: [{ url: PUBLIC_ORIGIN, description: 'TRIBUTE gateway (Robinhood Chain 4663 / USDG)' }],
+      servers: [{ url: PUBLIC_ORIGIN, description: 'COVENANT gateway (Robinhood Chain 4663 / USDG)' }],
       security: [{ x402: [] }],
       tags: [{ name: 'Paid APIs', description: 'x402 pay-per-call endpoints in USDG' }],
       components: {
@@ -403,7 +403,7 @@ const server = http.createServer(async (req, res) => {
     send(res, 200, {
       version: 1,
       resources,
-      instructions: 'TRIBUTE x402 gateway — USDG on Robinhood Chain 4663. See /openapi.json for the canonical machine-readable contract. Every resource above accepts two payment schemes: "exact" (per-call) and "tribute-session" (settle once for 100 calls / 1h via POST /facilitator/settle {resource:"session"}, then POST /session/redeem per call — no further wallet interaction).'
+      instructions: 'COVENANT x402 gateway — USDG on Robinhood Chain 4663. See /openapi.json for the canonical machine-readable contract. Every resource above accepts two payment schemes: "exact" (per-call) and "covenant-session" (settle once for 100 calls / 1h via POST /facilitator/settle {resource:"session"}, then POST /session/redeem per call — no further wallet interaction).'
     })
     return
   }
@@ -545,7 +545,7 @@ const server = http.createServer(async (req, res) => {
       })
       return
     }
-    // TRIBUTE's own route: payloadFor() hits live feeds (RSS / GeckoTerminal)
+    // COVENANT's own route: payloadFor() hits live feeds (RSS / GeckoTerminal)
     // with a 60s cache. If upstream is down we still honour the payment
     // receipt — but say so.
     let payload = null
@@ -578,10 +578,10 @@ const server = http.createServer(async (req, res) => {
   // scheme is "exact" to match the OpenAPI x-payment-info declaration — x402scan's
   // parser rejects challenges whose runtime scheme doesn't match the discovery doc.
   // Settlement itself (facilitator.settle) verifies the signed EIP-712 intent, not
-  // this label, so relabeling tribute-intent -> exact is safe and doesn't change
+  // this label, so relabeling covenant-intent -> exact is safe and doesn't change
   // the actual approve+transferFrom flow (USDG on 4663 has no EIP-3009).
   if (req.url.startsWith('/x402/premium') || req.url === '/x402' || req.url === '/x402/') {
-    const payTo = process.env.TRIBUTE_X402_PAYTO || '0x0000000000000000000000000000000000000000'
+    const payTo = process.env.COVENANT_X402_PAYTO || '0x0000000000000000000000000000000000000000'
     const body = {
       x402Version: 1,
       error: 'PAYMENT_REQUIRED',
@@ -590,7 +590,7 @@ const server = http.createServer(async (req, res) => {
         network: 'eip155:4663',
         maxAmountRequired: '10000',
         resource: PUBLIC_ORIGIN + '/x402/premium',
-        description: 'TRIBUTE premium alert sample — 0.01 USDG',
+        description: 'COVENANT premium alert sample — 0.01 USDG',
         mimeType: 'application/json',
         payTo,
         maxTimeoutSeconds: 60,
@@ -599,11 +599,11 @@ const server = http.createServer(async (req, res) => {
       },
       {
         // session option: pay once, call N times (Stripe MPP-style session intent)
-        scheme: 'tribute-session',
+        scheme: 'covenant-session',
         network: 'eip155:4663',
         maxAmountRequired: '10000',
         resource: 'session',
-        description: 'TRIBUTE session — 0.01 USDG for 100 calls / 1h (set extra.calls/ttlSec to customize)',
+        description: 'COVENANT session — 0.01 USDG for 100 calls / 1h (set extra.calls/ttlSec to customize)',
         mimeType: 'application/json',
         payTo,
         maxTimeoutSeconds: 60,
@@ -757,7 +757,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.url === '/vault/status') {
-    res.end(JSON.stringify({ ...vault.stats(), service: 'tribute-vault' }))
+    res.end(JSON.stringify({ ...vault.stats(), service: 'covenant-vault' }))
     return
   }
 
@@ -870,7 +870,7 @@ const server = http.createServer(async (req, res) => {
         scheme: 'exact', network: 'eip155:4663',
         maxAmountRequired: String(x402r.priceToAtomic(amount)),
         resource: PUBLIC_ORIGIN + '/x402/balance/topup',
-        description: `TRIBUTE balance top-up ${amount} USDG for ${buyer}`,
+        description: `COVENANT balance top-up ${amount} USDG for ${buyer}`,
         mimeType: 'application/json',
         payTo: facilitator.publicView().spender,
         maxTimeoutSeconds: 60, asset: x402r.USDG,
@@ -964,7 +964,7 @@ const server = http.createServer(async (req, res) => {
     }
     try {
       const r = await fetch('https://r.jina.ai/' + target, {
-        headers: { 'User-Agent': 'tribute-console/1.0', 'Accept': 'text/plain' },
+        headers: { 'User-Agent': 'covenant-console/1.0', 'Accept': 'text/plain' },
         signal: AbortSignal.timeout(15000),
       })
       if (!r.ok) return send(res, 502, { error: 'reader upstream ' + r.status })
@@ -1196,4 +1196,4 @@ const server = http.createServer(async (req, res) => {
   send(res, 404, { error: 'not found' })
 })
 
-server.listen(PORT, '127.0.0.1', () => console.log(`tribute-rpc-proxy on 127.0.0.1:${PORT}`))
+server.listen(PORT, '127.0.0.1', () => console.log(`covenant-rpc-proxy on 127.0.0.1:${PORT}`))

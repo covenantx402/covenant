@@ -1,5 +1,5 @@
-// gateway/test/smoke.js — end-to-end smoke test of the TRIBUTE gateway.
-// Run: npm test  (starts nothing itself; expects TRIBUTE_TEST_PORT free)
+// gateway/test/smoke.js — end-to-end smoke test of the COVENANT gateway.
+// Run: npm test  (starts nothing itself; expects COVENANT_TEST_PORT free)
 // Spawns the server on a test port with isolated stores, exercises:
 //   key mint → auth gate → vault put/broker/scrub → wallet create →
 //   restart persistence → facilitator verify (positive recovery + negative cases) → RPC whitelist
@@ -12,10 +12,10 @@ const assert = require('assert')
 
 const PORT = 8971
 const BASE = `http://127.0.0.1:${PORT}`
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tribute-test-'))
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'covenant-test-'))
 // Isolate in-process module stores too (reputation is required directly below,
 // so it must open the SAME sqlite file the spawned server process writes to).
-process.env.TRIBUTE_DB_PATH = path.join(tmp, 'gateway.db')
+process.env.COVENANT_DB_PATH = path.join(tmp, 'gateway.db')
 
 function req(method, p, body, headers = {}) {
   return new Promise((resolve, reject) => {
@@ -37,11 +37,11 @@ function startServer() {
       cwd: path.join(__dirname, '..'),
       env: {
         ...process.env,
-        TRIBUTE_RPC_UPSTREAM: process.env.TRIBUTE_RPC_UPSTREAM || 'https://robinhood-rpc.publicnode.com',
-        TRIBUTE_PORT: String(PORT),
-        TRIBUTE_SETTLE_KEY: '0x' + '11'.repeat(32),
-        TRIBUTE_DB_PATH: path.join(tmp, 'gateway.db'),
-        TRIBUTE_ROUTES_STORE: path.join(tmp, 'routes.json'),
+        COVENANT_RPC_UPSTREAM: process.env.COVENANT_RPC_UPSTREAM || 'https://robinhood-rpc.publicnode.com',
+        COVENANT_PORT: String(PORT),
+        COVENANT_SETTLE_KEY: '0x' + '11'.repeat(32),
+        COVENANT_DB_PATH: path.join(tmp, 'gateway.db'),
+        COVENANT_ROUTES_STORE: path.join(tmp, 'routes.json'),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -67,7 +67,7 @@ async function main() {
 
     // mint key
     const mint = await req('POST', '/keys', { label: 'smoke' })
-    assert.strictEqual(mint.status, 201); assert.ok(mint.json.key.startsWith('trb_')); ok('key minted')
+    assert.strictEqual(mint.status, 201); assert.ok(mint.json.key.startsWith('cvn_')); ok('key minted')
     const AUTH = { Authorization: 'Bearer ' + mint.json.key }
 
     // vault put + broker + scrub
@@ -98,7 +98,7 @@ async function main() {
       validAfter: String(now - 10), validBefore: String(now + 300),
       nonce: ethers.hexlify(ethers.randomBytes(32)), resource: '/x402/premium',
     }
-    const domain = { name: 'TRIBUTE', version: '1', chainId: 4663, verifyingContract: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168' }
+    const domain = { name: 'COVENANT', version: '1', chainId: 4663, verifyingContract: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168' }
     const types = { PaymentIntent: [
       { name: 'from', type: 'address' }, { name: 'to', type: 'address' }, { name: 'value', type: 'uint256' },
       { name: 'validAfter', type: 'uint256' }, { name: 'validBefore', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }, { name: 'resource', type: 'string' },
@@ -169,7 +169,7 @@ async function main() {
     // x402 402 challenge advertises session option
     const r402b = await req('GET', '/x402/premium')
     const reqs = JSON.parse(Buffer.from(r402b.headers['x-payment-required-v1'], 'base64').toString())
-    assert.ok(reqs.accepts.some(a => a.scheme === 'tribute-session')); ok('402 challenge offers session scheme')
+    assert.ok(reqs.accepts.some(a => a.scheme === 'covenant-session')); ok('402 challenge offers session scheme')
 
     // x402 v2: Payment-Required / X-PAYMENT-REQUIRED now carry a genuine v2
     // PaymentRequired object (renamed `amount` field, resource as an object,

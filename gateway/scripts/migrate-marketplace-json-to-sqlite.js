@@ -4,12 +4,12 @@
 // when the SQLite tables already have data (INSERT ... ON CONFLICT DO
 // NOTHING / skips existing slugs) — idempotent, re-runnable.
 //
-// Usage: TRIBUTE_DB_PATH=... TRIBUTE_MARKETPLACE_STORE=... node scripts/migrate-marketplace-json-to-sqlite.js
+// Usage: COVENANT_DB_PATH=... COVENANT_MARKETPLACE_STORE=... node scripts/migrate-marketplace-json-to-sqlite.js
 const fs = require('fs')
 const path = require('path')
 const db = require('../db')
 
-const STORE_PATH = process.env.TRIBUTE_MARKETPLACE_STORE ||
+const STORE_PATH = process.env.COVENANT_MARKETPLACE_STORE ||
   path.join(__dirname, '..', 'data', 'marketplace.json')
 
 if (!fs.existsSync(STORE_PATH)) {

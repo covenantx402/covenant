@@ -66,7 +66,7 @@ const keyHash = k => crypto.createHash('sha256').update(String(k)).digest('hex')
 
 function createKey(addr) {
   const r = rec(addr); if (!r) return null
-  const key = 'trb_' + crypto.randomBytes(20).toString('base64url')
+  const key = 'cvn_' + crypto.randomBytes(20).toString('base64url')
   stmts.insertKey.run(keyHash(key), addr.toLowerCase(), Date.now())
   return { key, address: r.address }
 }
