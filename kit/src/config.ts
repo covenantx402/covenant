@@ -63,5 +63,9 @@ export function validateConfig(input: unknown): PaywallConfig {
     dbPath: typeof c.dbPath === "string" ? c.dbPath : "./x402-kit.db",
     settlementWebhook:
       typeof c.settlementWebhook === "string" ? c.settlementWebhook : undefined,
+    settlementWebhookSecret:
+      typeof c.settlementWebhookSecret === "string"
+        ? c.settlementWebhookSecret
+        : undefined,
   };
 }

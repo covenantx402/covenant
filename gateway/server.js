@@ -138,23 +138,81 @@ function send402(res, body) {
 /* Receipt check that also honours intents signed against the old placeholder
    resource origin (https://covenant.re) so in-flight sessions/receipts keep
    working after the canonical-origin switch. */
-function paidFor(header, resource) {
-  return facilitator.paymentRecordFor(header, resource) ||
-    facilitator.paymentRecordFor(header, resource.replace(PUBLIC_ORIGIN, 'https://covenant.re'))
+function paidFor(header, resource, chainId = facilitator.DEFAULT_CHAIN_ID) {
+  return facilitator.paymentRecordFor(header, resource, chainId) ||
+    facilitator.paymentRecordFor(header, resource.replace(PUBLIC_ORIGIN, 'https://covenant.re'), chainId)
+}
+
+// A payment's selected network is carried twice: the signed EIP-712 domain
+// (payload.chainId) and the resource URL query (`?chain=`). Require them to
+// agree BEFORE a transferFrom can happen. Without this, a client could pay
+// on chain A while naming a chain-B resource, creating a receipt that cannot
+// legitimately unlock anything (or worse, becomes a cross-rail confusion
+// bug if a future caller forgets the receipt-side check).
+function resourceChainMatches(resource, chainId) {
+  if (String(resource || '') === 'session') return true
+  try {
+    const u = new URL(String(resource), PUBLIC_ORIGIN)
+    const requested = u.searchParams.get('chain')
+    return requested == null || Number(requested) === Number(chainId)
+  } catch { return true } // non-URL/custom resource: no chain assertion to make
+}
+
+// Settle only a requirement this gateway could have quoted. The EIP-712
+// signature authorizes a transfer, but it is not a server-side price quote:
+// bind all quote-controlled fields here before calling transferFrom.
+function validateQuotedIntent(intent, chainId) {
+  if (!intent || typeof intent !== 'object') return 'missing payment intent'
+  const c = facilitator.chains.getChain(chainId)
+  const spender = facilitator.publicView(chainId).spender
+  if (!spender || String(intent.to || '').toLowerCase() !== spender.toLowerCase()) return 'intent.to must equal the advertised facilitator payTo address'
+  const base = PUBLIC_ORIGIN
+  let expectedResource, expectedValue
+  if (intent.resource === 'session') {
+    expectedResource = 'session'
+    expectedValue = String(10n ** BigInt(c.decimals - 2))
+  } else {
+    let u
+    try { u = new URL(String(intent.resource), base) } catch { return 'intent.resource is not a valid gateway resource' }
+    const allowedOrigin = u.origin === new URL(base).origin || u.origin === 'https://covenant.re'
+    if (!allowedOrigin) return 'intent.resource must use the gateway origin'
+    const selected = u.searchParams.get('chain')
+    if ((chainId === facilitator.DEFAULT_CHAIN_ID && selected !== null) || (chainId !== facilitator.DEFAULT_CHAIN_ID && selected !== String(chainId))) return 'intent.resource chain does not match payload.chainId'
+    if (u.pathname === '/x402/premium' && [...u.searchParams.keys()].every(k => k === 'chain')) {
+      expectedResource = base + '/x402/premium' + (chainId === facilitator.DEFAULT_CHAIN_ID ? '' : `?chain=${chainId}`)
+      expectedValue = String(10n ** BigInt(c.decimals - 2))
+    } else if (u.pathname.startsWith('/x402/api/')) {
+      const slug = u.pathname.slice('/x402/api/'.length)
+      if (!/^[a-z0-9-]{1,32}$/.test(slug)) return 'unknown paid API resource'
+      const rec = x402r.get(slug)
+      const mkt = rec ? null : marketplace.get(slug)
+      if (!rec && !mkt) return 'unknown paid API resource'
+      if (mkt && chainId !== facilitator.DEFAULT_CHAIN_ID) return 'marketplace listings settle on Robinhood Chain 4663 only'
+      const plan = u.searchParams.get('plan') === '1'
+      if ([...u.searchParams.entries()].some(([k, v]) => (k !== 'chain' && !(k === 'plan' && v === '1')))) return 'intent.resource has unsupported query parameters'
+      if (plan && (!mkt || !mkt.plan)) return 'this API has no subscription plan'
+      expectedResource = base + '/x402/api/' + slug + (plan ? '?plan=1' : '') + (chainId === facilitator.DEFAULT_CHAIN_ID ? '' : `${plan ? '&' : '?'}chain=${chainId}`)
+      expectedValue = plan ? String(mkt.plan.atomic) : x402r.priceToAtomic((mkt || rec).price, chainId)
+    } else return 'intent.resource is not a paid gateway endpoint'
+  }
+  const actualResource = String(intent.resource).replace('https://covenant.re', base)
+  if (actualResource !== expectedResource) return 'intent.resource does not match the quoted gateway resource'
+  try { if (BigInt(intent.value) !== BigInt(expectedValue)) return 'intent.value does not match the quoted price' } catch { return 'intent.value is invalid' }
+  return null
 }
 
 /* Marketplace fee split, derived SERVER-SIDE from the payment intent's
    resource — the client never dictates legs. If the paid resource maps to an
    active listing, push the seller's share; the fee stays in the facilitator
    wallet. Guard: intent.to must be the facilitator wallet itself. */
-function serverSplitsFor(intent) {
+function serverSplitsFor(intent, chainId = facilitator.DEFAULT_CHAIN_ID) {
   try {
     const res = String(intent?.resource || '')
     if (!res.includes('/x402/api/')) return null
     const slug = res.split('/x402/api/')[1].split(/[/?#]/)[0]
     const mkt = marketplace.get(slug)
     if (!mkt) return null
-    const spender = (facilitator.publicView().spender || '').toLowerCase()
+    const spender = (facilitator.publicView(chainId).spender || '').toLowerCase()
     if (!spender || String(intent.to).toLowerCase() !== spender) return null
     // Tahap 5 — a plan purchase pays the discounted PLAN price, not per-call.
     if (/\?plan=1$/.test(res) && mkt.plan) {
@@ -293,6 +351,75 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  // Prometheus text-exposition metrics, sourced from the same live counters
+  // as /x402/stats (no separate tracking path to drift out of sync). Free,
+  // no auth — standard for a scrape target; put it behind your own
+  // reverse-proxy ACL if the gateway is reachable from the public internet
+  // and you don't want aggregate volume visible.
+  if (req.method === 'GET' && url === '/metrics') {
+    const f = facilitator.publicView()
+    const rep = reputation.stats()
+    const vaultStats = vault.stats()
+    const lines = [
+      '# HELP covenant_apis_total Number of registered paid API routes.',
+      '# TYPE covenant_apis_total gauge',
+      `covenant_apis_total ${x402r.list().length}`,
+      '# HELP covenant_x402_hits_total Total 402 challenges issued.',
+      '# TYPE covenant_x402_hits_total counter',
+      `covenant_x402_hits_total ${x402r.hits()}`,
+      '# HELP covenant_settled_usdg_total Cumulative USDG settled on-chain (default/Robinhood rail).',
+      '# TYPE covenant_settled_usdg_total counter',
+      `covenant_settled_usdg_total ${Number(f.totalSettledUsdg || 0)}`,
+      '# HELP covenant_settlements_total Count of successful on-chain settlements (default/Robinhood rail).',
+      '# TYPE covenant_settlements_total counter',
+      `covenant_settlements_total ${Number(f.settled || 0)}`,
+      '# HELP covenant_sessions_active Active prepaid call-budget sessions.',
+      '# TYPE covenant_sessions_active gauge',
+      `covenant_sessions_active ${Number(sessions.stats().activeSessions || 0)}`,
+      '# HELP covenant_vault_entries Encrypted secrets currently stored in the vault.',
+      '# TYPE covenant_vault_entries gauge',
+      `covenant_vault_entries ${vault.list().length}`,
+      '# HELP covenant_vault_broker_calls_total Prompts run with vault-injected secrets.',
+      '# TYPE covenant_vault_broker_calls_total counter',
+      `covenant_vault_broker_calls_total ${Number(vaultStats.brokered || 0)}`,
+      '# HELP covenant_reputation_agents Distinct addresses with a reputation score.',
+      '# TYPE covenant_reputation_agents gauge',
+      `covenant_reputation_agents ${Number(rep.knownAgents || 0)}`,
+      '# HELP covenant_wallets_total Agent wallets provisioned.',
+      '# TYPE covenant_wallets_total gauge',
+      `covenant_wallets_total ${Number(wallets.count() || 0)}`,
+      '# HELP covenant_keys_total Agent API keys minted.',
+      '# TYPE covenant_keys_total gauge',
+      `covenant_keys_total ${Number(keys.count() || 0)}`,
+      '# HELP covenant_chains_supported Number of chains this gateway can settle on.',
+      '# TYPE covenant_chains_supported gauge',
+      `covenant_chains_supported ${facilitator.chains.listChains().length}`,
+      '# HELP covenant_up Gateway process liveness.',
+      '# TYPE covenant_up gauge',
+      'covenant_up 1',
+    ]
+    res.statusCode = 200
+    res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8')
+    res.end(lines.join('\n') + '\n')
+    return
+  }
+
+  // Chain discovery — every chain COVENANT can settle on. Agents that want
+  // to pay on Base/Arbitrum/Ethereum instead of the Robinhood default read
+  // this first to get the chainId + asset address to sign against, then
+  // pass ?chain=<id> (GET) or intent chainId / body.chainId (POST) on every
+  // subsequent facilitator/x402 call. Omitting chain everywhere keeps the
+  // pre-multichain behavior (defaults to Robinhood 4663) — nothing existing
+  // breaks.
+  if (req.method === 'GET' && url === '/chains') {
+    const items = await Promise.all(facilitator.chains.listChains().map(async c => ({
+      ...c,
+      readiness: await facilitator.chainReadiness(c.id),
+    })))
+    send(res, 200, { ok: true, default: facilitator.DEFAULT_CHAIN_ID, chains: items })
+    return
+  }
+
   // Tiny SVG favicon so discovery auditors (x402scan) don't flag FAVICON_MISSING.
   if (req.method === 'GET' && (url === '/favicon.ico' || url === '/favicon.svg')) {
     res.statusCode = 200
@@ -356,8 +483,8 @@ const server = http.createServer(async (req, res) => {
       info: {
         title: 'COVENANT x402 Gateway',
         version: '2.0.0',
-        description: 'A next-gen x402 distribution layer for smarter launches. Pay-per-call APIs settled in USDG on Robinhood Chain 4663 — no accounts, no API keys, payment is authentication. Serves x402 v1 (JSON body) and v2 (Payment-Required header, extensions.bazaar discovery) simultaneously on every paid route.',
-        'x-guidance': 'Every /x402/api/<slug> route returns HTTP 402 with an x402 challenge until paid — GET/POST/HEAD all reach the challenge. Flow: read the 402 (v1: JSON body accepts[]; v2: decode the base64 Payment-Required header) → approve USDG to extra.spender → sign the EIP-712 PaymentIntent (domain name COVENANT, chainId 4663, verifyingContract = USDG) → POST /facilitator/settle {intent,signature} → replay the returned base64 receipt as X-PAYMENT header on the same GET. High-volume agents: settle once with resource "session" (0.01 USDG = 100 calls / 1h) then POST /session/redeem per call. Discovery catalog of routes: GET /x402/apis (free).',
+        description: 'A next-gen x402 distribution layer for smarter launches. Pay-per-call APIs settled in USDG/USDC across four chains (Robinhood 4663, Ethereum, Base, Arbitrum — see GET /chains) — no accounts, no API keys, payment is authentication. Serves x402 v1 (JSON body) and v2 (Payment-Required header, extensions.bazaar discovery) simultaneously on every paid route.',
+        'x-guidance': 'Every /x402/api/<slug> route returns HTTP 402 with an x402 challenge until paid — GET/POST/HEAD all reach the challenge. Flow: GET /chains to pick a settlement chain (defaults to Robinhood 4663) → read the 402 (v1: JSON body accepts[]; v2: decode the base64 Payment-Required header) → approve the chain stablecoin to extra.spender → sign the EIP-712 PaymentIntent (domain name COVENANT, chainId = your chosen chain, verifyingContract = that chain stablecoin) → POST /facilitator/settle {intent,signature,chainId} → replay the returned base64 receipt as X-PAYMENT header on the same GET. High-volume agents: settle once with resource "session" (0.01 USDG = 100 calls / 1h) then POST /session/redeem per call. Discovery catalog of routes: GET /x402/apis (free).',
         contact: { name: 'COVENANT', url: 'https://gateway.covenantx402.com' },
         'x-discovery': { protocolVersions: [1, 2] }
       },
@@ -375,6 +502,7 @@ const server = http.createServer(async (req, res) => {
         '/x402/marketplace': { get: { operationId: 'list_marketplace', summary: 'Third-party marketplace listings (free)', security: [], responses: { '200': { description: 'JSON catalog' } } } },
         '/facilitator': { get: { operationId: 'facilitator_status', summary: 'Settlement config (free)', security: [], responses: { '200': { description: 'JSON status' } } } },
         '/health': { get: { operationId: 'health', summary: 'Health check (free)', security: [], responses: { '200': { description: 'ok' } } } },
+        '/metrics': { get: { operationId: 'metrics', summary: 'Prometheus text-exposition metrics (free)', security: [], responses: { '200': { description: 'text/plain; version=0.0.4' } } } },
         '/session/redeem': {
           post: {
             operationId: 'session_redeem', summary: 'Redeem one call from a paid session (no wallet interaction, no on-chain tx)',
@@ -437,11 +565,29 @@ const server = http.createServer(async (req, res) => {
   // made these routes register as "no valid x402 response found".
   if ((req.method === 'GET' || req.method === 'POST' || req.method === 'HEAD') && url.startsWith('/x402/api/')) {
     const slug = url.slice('/x402/api/'.length).split('/')[0]
+    const reqUrl = new URL(req.url, PUBLIC_ORIGIN)
+    const chainParam = reqUrl.searchParams.get('chain')
+    let chainId = facilitator.DEFAULT_CHAIN_ID
+    if (chainParam) {
+      if (!facilitator.chains.isSupported(chainParam)) { send(res, 400, { error: `unsupported chain: ${chainParam}`, supported: facilitator.chains.listChains().map(c => c.id) }); return }
+      chainId = Number(chainParam)
+    }
+    if (!facilitator.isConfigured(chainId)) { send(res, 503, { error: `chain unavailable: settlement RPC is not configured for ${facilitator.chains.getChain(chainId).name}` }); return }
     const wantPlan = /[?&]plan=1/.test(req.url) // Tahap 5: buy an N-call subscription
     let rec = x402r.get(slug)
     const mkt = rec ? null : marketplace.get(slug)
     if (!rec && !mkt) { send(res, 404, { error: 'unknown api' }); return }
-    const resource = PUBLIC_ORIGIN + '/x402/api/' + slug + (wantPlan ? '?plan=1' : '')
+    // Marketplace's seller fee split / subscription ledger is still anchored
+    // to the Robinhood escrow wallet. Core COVENANT APIs are multichain now;
+    // reject a marketplace purchase on another chain loudly instead of
+    // accepting USDC there and accidentally attempting a seller payout from
+    // a different escrow balance. Marketplace multichain is a separate
+    // financial-product migration, not something to fake with a dropdown.
+    if (mkt && chainId !== facilitator.DEFAULT_CHAIN_ID) {
+      send(res, 400, { error: 'marketplace listings currently settle on Robinhood Chain 4663 only; choose Robinhood or use a core COVENANT API on this chain' })
+      return
+    }
+    const resource = PUBLIC_ORIGIN + '/x402/api/' + slug + (wantPlan ? '?plan=1' : '') + (chainParam ? `${wantPlan ? '&' : '?'}chain=${chainId}` : '')
     // ---- API-key path (prepaid balance): no per-call wallet signature ----
     const apiKey = req.headers['x-api-key']
     if (apiKey) {
@@ -460,7 +606,7 @@ const server = http.createServer(async (req, res) => {
       await deliverByKey(res, slug, mkt, rec, owner, sub ? 0n : debitAmt, sub)
       return
     }
-    const paid = paidFor(req.headers['x-payment'], resource)
+    const paid = paidFor(req.headers['x-payment'], resource, chainId)
     if (!paid && !rec) {
       // marketplace listing: build the challenge from the listing record
       marketplace.recordHit(slug)
@@ -477,8 +623,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (!paid) {
       x402r.bump(slug)
-      const reqt = x402r.requirement(rec, resource)
-      reqt.extra = { ...reqt.extra, spender: facilitator.publicView().spender || null }
+      const reqt = x402r.requirement(rec, resource, chainId, facilitator.publicView(chainId).spender)
+      // requirement() includes chainId/asset/spender; explicit assignment
+      // keeps the original response shape for older callers too.
+      reqt.extra = { ...reqt.extra, spender: facilitator.publicView(chainId).spender || null, chainId }
       send402(res, { x402Version: 1, error: 'PAYMENT_REQUIRED', accepts: [reqt] })
       return
     }
@@ -579,36 +727,50 @@ const server = http.createServer(async (req, res) => {
   // parser rejects challenges whose runtime scheme doesn't match the discovery doc.
   // Settlement itself (facilitator.settle) verifies the signed EIP-712 intent, not
   // this label, so relabeling covenant-intent -> exact is safe and doesn't change
-  // the actual approve+transferFrom flow (USDG on 4663 has no EIP-3009).
+  // the actual approve+transferFrom flow.
+  //
+  // ?chain=<id> selects which supported chain (see GET /chains) to challenge
+  // for — defaults to Robinhood 4663 (facilitator.DEFAULT_CHAIN_ID) so every
+  // pre-multichain caller that never passes ?chain keeps working unchanged.
   if (req.url.startsWith('/x402/premium') || req.url === '/x402' || req.url === '/x402/') {
-    const payTo = process.env.COVENANT_X402_PAYTO || '0x0000000000000000000000000000000000000000'
+    const reqUrl = new URL(req.url, PUBLIC_ORIGIN)
+    const chainParam = reqUrl.searchParams.get('chain')
+    let chainId = facilitator.DEFAULT_CHAIN_ID
+    if (chainParam) {
+      if (!facilitator.chains.isSupported(chainParam)) { send(res, 400, { error: `unsupported chain: ${chainParam}`, supported: facilitator.chains.listChains().map(c => c.id) }); return }
+      chainId = Number(chainParam)
+    }
+    if (!facilitator.isConfigured(chainId)) { send(res, 503, { error: `chain unavailable: settlement RPC is not configured for ${facilitator.chains.getChain(chainId).name}` }); return }
+    const chain = facilitator.chains.getChain(chainId)
+    const payTo = facilitator.publicView(chainId).spender || process.env.COVENANT_X402_PAYTO || '0x0000000000000000000000000000000000000000'
+    const priceAtomic = String(10n ** BigInt(chain.decimals - 2)) // 0.01 unit in this chain's decimals
     const body = {
       x402Version: 1,
       error: 'PAYMENT_REQUIRED',
       accepts: [{
         scheme: 'exact',
-        network: 'eip155:4663',
-        maxAmountRequired: '10000',
-        resource: PUBLIC_ORIGIN + '/x402/premium',
-        description: 'COVENANT premium alert sample — 0.01 USDG',
+        network: `eip155:${chainId}`,
+        maxAmountRequired: priceAtomic,
+        resource: PUBLIC_ORIGIN + '/x402/premium' + (chainParam ? `?chain=${chainId}` : ''),
+        description: `COVENANT premium alert sample — 0.01 ${chain.usdcSymbol} on ${chain.name}`,
         mimeType: 'application/json',
         payTo,
         maxTimeoutSeconds: 60,
-        asset: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168',
-        extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION, spender: (facilitator.publicView().spender || null) }
+        asset: chain.usdc,
+        extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION, chainId, spender: payTo }
       },
       {
         // session option: pay once, call N times (Stripe MPP-style session intent)
         scheme: 'covenant-session',
-        network: 'eip155:4663',
-        maxAmountRequired: '10000',
+        network: `eip155:${chainId}`,
+        maxAmountRequired: priceAtomic,
         resource: 'session',
-        description: 'COVENANT session — 0.01 USDG for 100 calls / 1h (set extra.calls/ttlSec to customize)',
+        description: `COVENANT session — 0.01 ${chain.usdcSymbol} for 100 calls / 1h on ${chain.name} (set extra.calls/ttlSec to customize)`,
         mimeType: 'application/json',
         payTo,
         maxTimeoutSeconds: 60,
-        asset: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168',
-        extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION, spender: (facilitator.publicView().spender || null), calls: 100, ttlSec: 3600 }
+        asset: chain.usdc,
+        extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION, chainId, spender: payTo, calls: 100, ttlSec: 3600 }
       }]
     }
     x402r.log('402', { slug: 'premium', path: '/premium', price: '0.01' })
@@ -616,17 +778,22 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  // facilitator status (shows settlement config, no secrets)
+  // facilitator status (shows settlement config, no secrets). ?chain=<id>
+  // selects which chain's view to return — defaults to Robinhood 4663.
   if (req.method === 'GET' && url === '/facilitator') {
-    res.end(JSON.stringify(facilitator.publicView()))
+    const reqUrl = new URL(req.url, PUBLIC_ORIGIN)
+    const chainParam = reqUrl.searchParams.get('chain')
+    if (chainParam && !facilitator.chains.isSupported(chainParam)) { send(res, 400, { error: `unsupported chain: ${chainParam}` }); return }
+    res.end(JSON.stringify(facilitator.publicView(chainParam ? Number(chainParam) : undefined)))
     return
   }
 
-  // verify a signed payment intent (no settlement)
+  // verify a signed payment intent (no settlement). chainId in the body
+  // selects the domain/asset to verify against — defaults to Robinhood 4663.
   if (req.method === 'POST' && url === '/facilitator/verify') {
     readBody(req, (err, payload) => {
       if (err) { send(res, 400, { error: 'bad json' }); return }
-      facilitator.verify(payload.intent, payload.signature).then(v => {
+      facilitator.verify(payload.intent, payload.signature, payload.chainId).then(v => {
         send(res, 200, { isValid: v.ok, invalidReason: v.reason || undefined, payer: v.payer || undefined })
       })
     })
@@ -637,15 +804,27 @@ const server = http.createServer(async (req, res) => {
   // Two resource shapes:
   //   - "session" (with calls/ttl in extra) → opens a paid session for N calls
   //   - anything else → one-shot resource payment
+  // payload.chainId picks which chain to settle on — defaults to Robinhood
+  // 4663, so callers that never send chainId keep the exact pre-multichain
+  // behavior.
   if (req.method === 'POST' && url === '/facilitator/settle') {
     readBody(req, (err, payload) => {
       if (err) { send(res, 400, { error: 'bad json' }); return }
-      facilitator.settle(payload.intent, payload.signature, serverSplitsFor(payload.intent)).then(v => {
-        vault.audit(v.success ? 'settle-ok' : 'settle-fail', v.payer || null, { tx: v.transaction || v.errorReason })
+      const chainId = payload.chainId != null ? Number(payload.chainId) : facilitator.DEFAULT_CHAIN_ID
+      if (!facilitator.chains.isSupported(chainId)) { send(res, 400, { error: `unsupported chain: ${chainId}` }); return }
+      if (!facilitator.isConfigured(chainId)) { send(res, 503, { error: `chain unavailable: settlement RPC is not configured for ${facilitator.chains.getChain(chainId).name}` }); return }
+      const quoteError = validateQuotedIntent(payload.intent, chainId)
+      if (quoteError) { send(res, 400, { error: quoteError }); return }
+      if (!resourceChainMatches(payload.intent?.resource, chainId)) {
+        send(res, 400, { error: 'intent resource chain does not match payload.chainId — request a fresh 402 challenge for the selected chain' })
+        return
+      }
+      facilitator.settle(payload.intent, payload.signature, serverSplitsFor(payload.intent, chainId), chainId).then(v => {
+        vault.audit(v.success ? 'settle-ok' : 'settle-fail', v.payer || null, { tx: v.transaction || v.errorReason, chainId })
         let out = v
         if (v.success) {
           reputation.record(v.payer, {
-            valueFormatted: (Number(payload.intent?.value || 0) / 1e6).toFixed(6),
+            valueFormatted: (Number(payload.intent?.value || 0) / (10 ** facilitator.chains.getChain(chainId).decimals)).toFixed(6),
             resource: payload.intent?.resource,
             txHash: v.transaction,
           })
@@ -658,6 +837,7 @@ const server = http.createServer(async (req, res) => {
               calls: extra.calls,
               ttlSec: extra.ttlSec,
               txHash: v.transaction,
+              chainId,
             })
             out = { ...v, session: { id: s.sessionId, callsMax: s.calls.max, expiresAt: s.expiresAt } }
           }

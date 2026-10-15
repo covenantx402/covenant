@@ -4,8 +4,12 @@
 // hit (this used to fs.writeFileSync the whole registry on every single
 // unpaid request to any paid route).
 const db = require('./db')
+const chains = require('./chains')
 
-const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'
+// Back-compat export for callers that still import x402r.USDG directly —
+// points at the old/default Robinhood payment asset. New challenge code uses
+// requirement(..., chainId) below and never relies on this constant.
+const USDG = chains.getChain(chains.DEFAULT_CHAIN_ID).usdc
 /* Must match facilitator.js EIP-712 DOMAIN — the 402 body advertises these
    to the client so the wallet shows the same name the signature uses. */
 const DOMAIN_NAME = 'COVENANT'
@@ -36,24 +40,27 @@ function slugify(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || 'api'
 }
 
-function priceToAtomic(price) {
+function priceToAtomic(price, chainId = chains.DEFAULT_CHAIN_ID) {
+  const c = chains.getChain(chainId)
   const [w, f = ''] = String(price).split('.')
-  const s = (w + (f + '000000').slice(0, 6)).replace(/^0+(?=\d)/, '') || '0'
+  const s = (w + (f + '0'.repeat(c.decimals)).slice(0, c.decimals)).replace(/^0+(?=\d)/, '') || '0'
   return String(BigInt(s))
 }
 
-function requirement(route, resource) {
+function requirement(route, resource, chainId = chains.DEFAULT_CHAIN_ID, spender) {
+  const c = chains.getChain(chainId)
+  const payTo = spender || route.payTo
   return {
     scheme: 'exact',
-    network: 'eip155:4663',
-    maxAmountRequired: priceToAtomic(route.price),
+    network: `eip155:${c.id}`,
+    maxAmountRequired: priceToAtomic(route.price, c.id),
     resource,
     description: route.description,
     mimeType: 'application/json',
-    payTo: route.payTo,
+    payTo,
     maxTimeoutSeconds: 60,
-    asset: USDG,
-    extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION }
+    asset: c.usdc,
+    extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION, chainId: c.id, spender: payTo }
   }
 }
 

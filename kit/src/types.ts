@@ -60,6 +60,14 @@ export interface PaywallConfig {
   dbPath?: string;
   /** Webhook URL called after each successful settlement */
   settlementWebhook?: string;
+  /**
+   * Shared secret for signing settlement webhook payloads (HMAC-SHA256).
+   * When set, every webhook POST carries an `X-Covenant-Signature` header
+   * (`sha256=<hex>`, computed over the raw JSON body) so the receiver can
+   * reject spoofed calls instead of trusting an unauthenticated POST.
+   * Strongly recommended whenever settlementWebhook is set.
+   */
+  settlementWebhookSecret?: string;
 }
 
 export interface PaymentRequirements {
