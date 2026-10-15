@@ -22,12 +22,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tributelab/covenant.git",
+    "url": "git+https://github.com/covenantx402/covenant.git",
     "directory": "kit"
   },
-  "homepage": "https://github.com/tributelab/covenant#readme",
+  "homepage": "https://github.com/covenantx402/covenant#readme",
   "bugs": {
-    "url": "https://github.com/tributelab/covenant/issues"
+    "url": "https://github.com/covenantx402/covenant/issues"
   },
   "scripts": {
     "build": "tsc -p .",

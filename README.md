@@ -6,7 +6,7 @@
 <p align="center"><strong>Multi-chain x402 payment rails + agent infrastructure</strong></p>
 
 <p align="center">
-  <a href="https://github.com/tributelab/covenant/actions/workflows/ci.yml"><img src="https://github.com/tributelab/covenant/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/covenantx402/covenant/actions/workflows/ci.yml"><img src="https://github.com/covenantx402/covenant/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <a href="https://www.npmjs.com/package/@covenantx402/x402-kit"><img src="https://img.shields.io/npm/v/%40covenantx402%2Fx402-kit.svg" alt="npm version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1ecb74.svg" alt="MIT License"></a>
   <img src="https://img.shields.io/badge/x402-v1%20%2B%20v2-1ecb74.svg" alt="x402 v1 + v2">
@@ -167,7 +167,7 @@ Full usage: [`kit/README.md`](kit/README.md).
 
 ## Examples
 
-- `examples/paid-api.js` — spin up a paid endpoint with the gateway
+- `examples/paid-api.js` — register a paid route on a running gateway (`node examples/paid-api.js /alerts 0.01 0xYourAddress`)
 - `examples/pay.js` — agent client: fetch 402 → sign intent → settle → receive resource
 
 ## Testing

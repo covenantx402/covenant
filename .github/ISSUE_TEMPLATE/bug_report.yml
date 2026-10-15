@@ -1,0 +1,30 @@
+name: Bug report
+description: Something in the gateway or kit isn't behaving as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected vs. what actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands/requests. A curl one-liner is ideal.
+    validations:
+      required: true
+  - type: input
+    id: component
+    attributes:
+      label: Component
+      description: gateway, kit, or skill?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Error messages, response body, or `npm test` output.

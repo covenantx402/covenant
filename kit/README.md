@@ -1,9 +1,9 @@
 # @covenantx402/x402-kit
 
-TypeScript x402 paywall middleware for Express. Turn any route into a paid USDG endpoint settled on Robinhood Chain (chain ID 4663) via the [COVENANT](https://github.com/tributelab/covenant) gateway — or any x402 facilitator.
+TypeScript x402 paywall middleware for Express. Turn any route into a paid USDG endpoint settled on Robinhood Chain (chain ID 4663) via the [COVENANT](https://github.com/covenantx402/covenant) gateway — or any x402 facilitator.
 
 [![npm version](https://img.shields.io/npm/v/%40covenantx402%2Fx402-kit.svg)](https://www.npmjs.com/package/@covenantx402/x402-kit)
-[![license](https://img.shields.io/npm/l/%40covenantx402%2Fx402-kit.svg)](https://github.com/tributelab/covenant/blob/main/LICENSE)
+[![license](https://img.shields.io/npm/l/%40covenantx402%2Fx402-kit.svg)](https://github.com/covenantx402/covenant/blob/main/LICENSE)
 
 ## Install
 
@@ -88,7 +88,7 @@ See `src/types.ts` for the full `PaywallConfig` / `RoutePricing` shape.
 
 ## Related
 
-- Gateway + vault + reputation stack: [tributelab/covenant](https://github.com/tributelab/covenant)
+- Gateway + vault + reputation stack: [covenantx402/covenant](https://github.com/covenantx402/covenant)
 - Full protocol docs: repo README and `skill/SKILL.md`
 
 ## License
