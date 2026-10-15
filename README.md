@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/chains-4%20(Robinhood%2C%20Ethereum%2C%20Base%2C%20Arbitrum)-1ecb74.svg" alt="4 chains supported">
 </p>
 
-<p align="center"><img src="assets/banner.svg" width="100%" alt="COVENANT banner" /></p>
+<p align="center"><img src="assets/banner.png" width="100%" alt="COVENANT banner" /></p>
 
 > Paid agent endpoints in USDC/USDG over x402, with instant on-chain settlement and credentials that never touch a prompt.
 
