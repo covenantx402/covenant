@@ -45,12 +45,32 @@ process.on('SIGTERM', close)
 
 Config can also be loaded from a YAML file: `install(app, { config: './x402.yaml' })`.
 
+## Signed settlement webhooks
+
+Set `settlementWebhook` to get a POST after every successful settlement. Set `settlementWebhookSecret` too and every delivery carries an HMAC-SHA256 `X-Covenant-Signature: sha256=<hex>` header (computed over the raw JSON body), with 3-attempt exponential-backoff delivery — a receiver can reject forged callbacks instead of trusting an unauthenticated POST to a guessable URL.
+
+```ts
+import { verifyWebhookSignature } from '@covenantx402/x402-kit'
+
+app.post('/webhooks/covenant', express.raw({ type: '*/*' }), (req, res) => {
+  const ok = verifyWebhookSignature(
+    req.body.toString('utf8'),
+    req.header('x-covenant-signature'),
+    process.env.WEBHOOK_SECRET!,
+  )
+  if (!ok) return res.status(401).end()
+  // ... trust the payload
+  res.status(200).end()
+})
+```
+
 ## Features
 
 - USD-decimal route pricing (`"0.01"`), converted to atomic stablecoin units per network's decimals.
 - `FacilitatorClient` — thin HTTP client for `/verify` and `/settle`, usable standalone.
 - `UsageLogger` — SQLite-backed per-route, per-payer event log (`better-sqlite3`).
 - Per-network asset metadata built in: Base/Polygon/Arbitrum/Optimism (USDC) and Robinhood Chain (USDG).
+- HMAC-signed settlement webhooks with retry — see above.
 
 ## API surface
 
@@ -58,6 +78,7 @@ Config can also be loaded from a YAML file: `install(app, { config: './x402.yaml
 |---|---|
 | `install(app, opts)` | Mount paywall + analytics router on an Express app |
 | `paywall({ config, logger, facilitator })` | Lower-level middleware factory, if you want to wire pieces yourself |
+| `verifyWebhookSignature(rawBody, header, secret)` | Constant-time check for an inbound `X-Covenant-Signature` header |
 | `FacilitatorClient` | Verify/settle HTTP client |
 | `UsageLogger` | SQLite usage tracker |
 | `loadConfigFromFile(path)` / `validateConfig(obj)` | YAML or programmatic config loading |

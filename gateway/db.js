@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS wallets (
 
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
+  chain_id INTEGER NOT NULL DEFAULT 4663,
   payer TEXT NOT NULL,
   pay_to TEXT,
   value TEXT,
@@ -82,16 +83,24 @@ CREATE TABLE IF NOT EXISTS reputation (
 CREATE INDEX IF NOT EXISTS idx_reputation_score_inputs ON reputation(settled_count DESC, total_usdg DESC);
 
 CREATE TABLE IF NOT EXISTS nonces (
-  nonce TEXT PRIMARY KEY,
+  chain_id INTEGER NOT NULL DEFAULT 4663,
+  nonce TEXT NOT NULL,
   tx_hash TEXT,
   t INTEGER NOT NULL,
   from_addr TEXT,
   value TEXT,
-  redeemed INTEGER NOT NULL DEFAULT 0
+  redeemed INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (chain_id, nonce)
 );
+-- Composite PK matters: EIP-712 domain includes chainId, so the same nonce
+-- VALUE signed for two different chains produces two different (valid)
+-- signatures — they must not collide in the replay-guard table. A nonce
+-- unique only by its raw bytes would reject the second chain's legitimate
+-- payment as "already used".
 
 CREATE TABLE IF NOT EXISTS settlements (
-  tx_hash TEXT PRIMARY KEY,
+  chain_id INTEGER NOT NULL DEFAULT 4663,
+  tx_hash TEXT NOT NULL,
   t INTEGER NOT NULL,
   payer TEXT NOT NULL,
   pay_to TEXT NOT NULL,
@@ -101,10 +110,17 @@ CREATE TABLE IF NOT EXISTS settlements (
   gas_used TEXT,
   pending_splits TEXT,
   splits TEXT,
-  splits_cancelled INTEGER NOT NULL DEFAULT 0
+  splits_cancelled INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (chain_id, tx_hash)
 );
+-- tx_hash alone is already unique in practice (256-bit hash), but the
+-- composite key keeps this table consistent with nonces/sessions and makes
+-- "settlements on chain X" a plain indexed lookup instead of a WHERE scan.
 CREATE INDEX IF NOT EXISTS idx_settlements_t ON settlements(t DESC);
 CREATE INDEX IF NOT EXISTS idx_settlements_payer ON settlements(payer);
+-- idx_settlements_chain is created after the migration block below, once
+-- chain_id is guaranteed to exist (a fresh DB gets it from CREATE TABLE
+-- above; an upgraded DB gets it from the ALTER/rebuild migration).
 
 -- Prepaid buyer balances (was JSON-file-per-mutation in balance.js — same
 -- full-rewrite cost problem the rest of this file was migrated off of, and
@@ -214,5 +230,82 @@ CREATE TABLE IF NOT EXISTS marketplace_nonces (
   t INTEGER NOT NULL
 );
 `)
+
+// --- Migration: add chain_id to tables that predate multichain support ---
+// CREATE TABLE IF NOT EXISTS above is a no-op on a DB that already has these
+// tables from before this change (production has real nonces/settlements
+// history) — it does NOT alter existing schema. Handle that explicitly:
+// nonces/settlements need a PK change (single-column -> composite), which
+// SQLite can't ALTER in place, so those get a rebuild-and-copy. sessions
+// only gained a plain column, which SQLite CAN add in place.
+function hasColumn(table, col) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === col)
+}
+
+if (!hasColumn('nonces', 'chain_id')) {
+  // SQLite DDL is transactional. Run the rename → rebuild → copy → drop in
+  // ONE better-sqlite3 transaction, never as a sequence of autocommit DDL.
+  // If the process dies or any statement fails, rollback leaves the exact
+  // legacy nonces table intact — no window where replay protection can
+  // silently become an empty new table while history sits in a renamed one.
+  db.transaction(() => {
+    db.exec(`
+      ALTER TABLE nonces RENAME TO nonces_pre_multichain;
+      CREATE TABLE nonces (
+        chain_id INTEGER NOT NULL DEFAULT 4663,
+        nonce TEXT NOT NULL,
+        tx_hash TEXT,
+        t INTEGER NOT NULL,
+        from_addr TEXT,
+        value TEXT,
+        redeemed INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (chain_id, nonce)
+      );
+      INSERT INTO nonces (chain_id, nonce, tx_hash, t, from_addr, value, redeemed)
+        SELECT 4663, nonce, tx_hash, t, from_addr, value, redeemed FROM nonces_pre_multichain;
+      DROP TABLE nonces_pre_multichain;
+    `)
+  })()
+  console.log('[db] migrated nonces -> composite (chain_id, nonce) primary key')
+}
+
+if (!hasColumn('settlements', 'chain_id')) {
+  // Same atomic migration guarantee for settlement history — this table is
+  // financial/audit evidence, so a partial rebuild is unacceptable.
+  db.transaction(() => {
+    db.exec(`
+      ALTER TABLE settlements RENAME TO settlements_pre_multichain;
+      CREATE TABLE settlements (
+        chain_id INTEGER NOT NULL DEFAULT 4663,
+        tx_hash TEXT NOT NULL,
+        t INTEGER NOT NULL,
+        payer TEXT NOT NULL,
+        pay_to TEXT NOT NULL,
+        value TEXT NOT NULL,
+        value_formatted TEXT NOT NULL,
+        resource TEXT,
+        gas_used TEXT,
+        pending_splits TEXT,
+        splits TEXT,
+        splits_cancelled INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (chain_id, tx_hash)
+      );
+      INSERT INTO settlements (chain_id, tx_hash, t, payer, pay_to, value, value_formatted, resource, gas_used, pending_splits, splits, splits_cancelled)
+        SELECT 4663, tx_hash, t, payer, pay_to, value, value_formatted, resource, gas_used, pending_splits, splits, splits_cancelled FROM settlements_pre_multichain;
+      DROP TABLE settlements_pre_multichain;
+      CREATE INDEX IF NOT EXISTS idx_settlements_t ON settlements(t DESC);
+      CREATE INDEX IF NOT EXISTS idx_settlements_payer ON settlements(payer);
+      CREATE INDEX IF NOT EXISTS idx_settlements_chain ON settlements(chain_id);
+    `)
+  })()
+  console.log('[db] migrated settlements -> composite (chain_id, tx_hash) primary key')
+}
+
+if (!hasColumn('sessions', 'chain_id')) {
+  db.exec(`ALTER TABLE sessions ADD COLUMN chain_id INTEGER NOT NULL DEFAULT 4663;`)
+  console.log('[db] migrated sessions -> added chain_id column')
+}
+
+db.exec(`CREATE INDEX IF NOT EXISTS idx_settlements_chain ON settlements(chain_id);`)
 
 module.exports = db

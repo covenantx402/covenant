@@ -56,6 +56,7 @@ export function install(app: Express, opts: InstallOptions): InstallHandle {
 }
 
 export { paywall } from "./middleware.js";
+export { verifyWebhookSignature } from "./middleware.js";
 export { analyticsRouter } from "./analytics.js";
 export { FacilitatorClient } from "./facilitator.js";
 export { UsageLogger } from "./usage-logger.js";

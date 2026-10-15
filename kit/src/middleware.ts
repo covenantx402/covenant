@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction, RequestHandler } from "express";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { FacilitatorClient } from "./facilitator.js";
 import { UsageLogger } from "./usage-logger.js";
 import {
@@ -17,6 +18,54 @@ import {
 const X402_VERSION = 1;
 /** USDC has 6 decimals on every supported network. */
 const USDC_DECIMALS = 6;
+const WEBHOOK_MAX_ATTEMPTS = 3;
+const WEBHOOK_BASE_DELAY_MS = 250;
+
+function signWebhookBody(body: string, secret: string): string {
+  return "sha256=" + createHmac("sha256", secret).update(body).digest("hex");
+}
+
+/**
+ * Verify an inbound webhook signature header (for receivers built with
+ * x402-kit on both ends). Uses a constant-time comparison to avoid leaking
+ * timing information about the expected signature.
+ */
+export function verifyWebhookSignature(
+  rawBody: string,
+  signatureHeader: string | undefined,
+  secret: string,
+): boolean {
+  if (!signatureHeader) return false;
+  const expected = signWebhookBody(rawBody, secret);
+  const a = Buffer.from(expected);
+  const b = Buffer.from(signatureHeader);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+async function deliverWebhook(
+  url: string,
+  body: string,
+  secret: string | undefined,
+): Promise<void> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (secret) headers["x-covenant-signature"] = signWebhookBody(body, secret);
+
+  let lastErr: Error | undefined;
+  for (let attempt = 1; attempt <= WEBHOOK_MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(url, { method: "POST", headers, body });
+      if (res.ok) return;
+      lastErr = new Error(`webhook responded ${res.status}`);
+    } catch (err) {
+      lastErr = err as Error;
+    }
+    if (attempt < WEBHOOK_MAX_ATTEMPTS) {
+      await new Promise((r) => setTimeout(r, WEBHOOK_BASE_DELAY_MS * 2 ** (attempt - 1)));
+    }
+  }
+  throw lastErr ?? new Error("webhook delivery failed");
+}
 
 /**
  * Convert a USD decimal string ("0.10") into the atomic-unit string
@@ -197,19 +246,20 @@ export function paywall(deps: PaywallMiddlewareDeps): RequestHandler {
             txHash = settle.transaction ?? null;
             if (config.settlementWebhook) {
               try {
-                await fetch(config.settlementWebhook, {
-                  method: "POST",
-                  headers: { "content-type": "application/json" },
-                  body: JSON.stringify({
-                    route: req.path,
-                    method: req.method,
-                    payer,
-                    amountUsd: pricing.price,
-                    network,
-                    txHash,
-                    timestamp: startedAt,
-                  }),
+                const body = JSON.stringify({
+                  route: req.path,
+                  method: req.method,
+                  payer,
+                  amountUsd: pricing.price,
+                  network,
+                  txHash,
+                  timestamp: startedAt,
                 });
+                await deliverWebhook(
+                  config.settlementWebhook,
+                  body,
+                  config.settlementWebhookSecret,
+                );
               } catch (err) {
                 reason = `webhook error: ${(err as Error).message}`;
               }

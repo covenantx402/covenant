@@ -9,7 +9,7 @@ const crypto = require('crypto')
 const db = require('./db')
 
 const stmts = {
-  insert: db.prepare('INSERT INTO sessions (id, payer, pay_to, value, calls_used, calls_max, expires_at, created_at, tx_hash) VALUES (?,?,?,?,0,?,?,?,?)'),
+  insert: db.prepare('INSERT INTO sessions (id, chain_id, payer, pay_to, value, calls_used, calls_max, expires_at, created_at, tx_hash) VALUES (?,?,?,?,?,0,?,?,?,?)'),
   get: db.prepare('SELECT * FROM sessions WHERE id = ?'),
   redeem: db.prepare('UPDATE sessions SET calls_used = calls_used + 1 WHERE id = ? AND calls_used < calls_max'),
   del: db.prepare('DELETE FROM sessions WHERE id = ?'),
@@ -19,15 +19,17 @@ const stmts = {
 
 /**
  * Open a session after a successful settlement whose intent.resource === "session".
+ * chainId records which chain the session's settlement happened on (defaults
+ * to Robinhood 4663 for compat with callers that predate multichain).
  * Returns the session record with its bearer id.
  */
-function open({ payer, payTo, value, calls, ttlSec, txHash }) {
+function open({ payer, payTo, value, calls, ttlSec, txHash, chainId }) {
   const id = crypto.randomBytes(24).toString('base64url')
   const callsMax = Math.max(1, Math.min(100000, Number(calls) || 100))
   const expiresAt = Date.now() + Math.min(86400, Math.max(60, Number(ttlSec) || 3600)) * 1000
   const createdAt = Date.now()
-  stmts.insert.run(id, payer, payTo || null, value != null ? String(value) : null, callsMax, expiresAt, createdAt, txHash || null)
-  return { sessionId: id, payer, payTo, value, calls: { used: 0, max: callsMax }, expiresAt, createdAt, txHash: txHash || null }
+  stmts.insert.run(id, Number(chainId) || 4663, payer, payTo || null, value != null ? String(value) : null, callsMax, expiresAt, createdAt, txHash || null)
+  return { sessionId: id, payer, payTo, value, chainId: Number(chainId) || 4663, calls: { used: 0, max: callsMax }, expiresAt, createdAt, txHash: txHash || null }
 }
 
 /**
@@ -52,6 +54,7 @@ function status(sessionId) {
   if (!s) return null
   return {
     payer: s.payer,
+    chainId: s.chain_id,
     callsUsed: s.calls_used,
     callsRemaining: s.calls_max - s.calls_used,
     expiresAt: s.expires_at,
