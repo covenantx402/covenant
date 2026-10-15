@@ -1,0 +1,16 @@
+name: Feature request
+description: Suggest a new endpoint, chain, or capability
+labels: [enhancement]
+body:
+  - type: textarea
+    id: motivation
+    attributes:
+      label: What problem does this solve
+      description: What can't you do today that this would enable?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: API shape, endpoint, or config if you have one in mind. Rough is fine.

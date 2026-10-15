@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # COVENANT safe deploy: repo/gateway -> live proxy (/root/tribute/proxy).
 #
-# Why this exists: the OSS repo (github.com/covenantlab/covenant) and the
+# Why this exists: the OSS repo (github.com/covenantx402/covenant) and the
 # live systemd service (covenant-proxy.service, running from
 # /root/tribute/proxy) are TWO SEPARATE COPIES of the same gateway code —
 # there is no shared filesystem link, no CI/CD. A fix landed in the repo

@@ -1,18 +1,38 @@
-// examples/paid-api.js — run a paid endpoint on the COVENANT gateway.
-// Assumes the gateway is running (node gateway/server.js) on 127.0.0.1:8792.
+// examples/paid-api.js — register a paid route on a running COVENANT gateway.
 //
-// 1. Register a paid route:
-curl_example() {} // (illustrative — see commands below)
+// Assumes the gateway is already running (node gateway/server.js) on
+// 127.0.0.1:8792. This script just calls the admin endpoint that registers
+// a new paid route — the actual 402 / settle flow is in examples/pay.js.
+//
+// Run: node examples/paid-api.js [path] [priceUsdg] [payToAddress]
 
-/*
-# Register a route priced at 0.01 USDG:
-curl -X POST http://127.0.0.1:8792/x402/apis \
-  -H 'content-type: application/json' \
-  -d '{"path":"/alerts","price":"0.01","description":"COVENANT whale alerts","payTo":"0xYOUR_WALLET"}'
+const GATEWAY = process.env.COVENANT_GATEWAY || 'http://127.0.0.1:8792'
 
-# Unpaid client call returns 402 + requirements:
-curl http://127.0.0.1:8792/x402/api/alerts
+async function main() {
+  const path = process.argv[2] || '/alerts'
+  const price = process.argv[3] || '0.01'
+  const payTo = process.argv[4] || process.env.COVENANT_X402_PAYTO
+  if (!payTo) {
+    console.error('usage: node examples/paid-api.js <path> <priceUsdg> <payToAddress>')
+    console.error('   or: set COVENANT_X402_PAYTO and omit the third argument')
+    process.exit(1)
+  }
 
-# A paying client signs a PaymentIntent and settles via POST /facilitator/settle.
-# After settlement the gateway serves the resource (see examples/pay.js).
-*/
+  const res = await fetch(`${GATEWAY}/x402/apis`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path, price, description: 'COVENANT example route', payTo }),
+  })
+  const body = await res.json()
+
+  if (!res.ok) {
+    console.error('registration failed:', res.status, body)
+    process.exit(1)
+  }
+
+  console.log('route registered:', body)
+  console.log(`unpaid test:   curl ${GATEWAY}/x402/api${path}`)
+  console.log('paying client: node examples/pay.js <private-key-with-USDG>')
+}
+
+main().catch(e => { console.error(e); process.exit(1) })
