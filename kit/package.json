@@ -1,16 +1,17 @@
 {
-  "name": "@covenant/x402-kit",
+  "name": "@covenantx402/x402-kit",
   "version": "1.0.0",
   "description": "COVENANT x402 paywall middleware — monetize any endpoint with USDG settlement on Robinhood Chain 4663",
   "keywords": [
     "x402",
     "paywall",
     "stablecoin",
-    "base",
-    "usdc",
+    "usdg",
+    "robinhood-chain",
     "micropayments",
     "express",
-    "middleware"
+    "middleware",
+    "agent-payments"
   ],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -19,6 +20,15 @@
     "README.md",
     "LICENSE"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tributelab/covenant.git",
+    "directory": "kit"
+  },
+  "homepage": "https://github.com/tributelab/covenant#readme",
+  "bugs": {
+    "url": "https://github.com/tributelab/covenant/issues"
+  },
   "scripts": {
     "build": "tsc -p .",
     "pretest": "npm run build"
@@ -38,5 +48,8 @@
     "typescript": "^5.9.3"
   },
   "license": "MIT",
-  "author": "COVENANT"
+  "author": "COVENANT",
+  "publishConfig": {
+    "access": "public"
+  }
 }
