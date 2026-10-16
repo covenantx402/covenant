@@ -40,6 +40,17 @@ const {
 } = require('@solana/kit')
 const bs58 = require('bs58').default || require('bs58')
 
+// SPL Token program — the ONLY program a buyer's instruction is allowed to
+// target. See the P0 fix below (assertSafeTx) for why this allowlist
+// exists: without it, a buyer could smuggle an UNRELATED instruction (e.g.
+// a plain SystemProgram transfer) into the same transaction that drains
+// the facilitator's own fee-payer account, since the fee payer's
+// signature — added blindly by settle() — satisfies that instruction's
+// signer requirement too. Verified exploitable with a real PoC before
+// this fix existed (see commit message).
+const SPL_TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
+const SPL_TOKEN_2022_PROGRAM = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'
+
 const NETWORK = {
   key: 'solana-devnet',
   caip2: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1', // Solana devnet genesis hash, per the x402 spec's documented network id
@@ -107,6 +118,54 @@ function decodeTransaction(base64Transaction) {
 }
 
 /**
+ * P0 anti-drain guard. Our fee payer co-signs (in settle()) WHATEVER
+ * transaction passed verify() — it never inspects what the instructions
+ * actually DO. Without this check, a buyer can smuggle an unrelated
+ * instruction into the same transaction that moves funds OUT of the fee
+ * payer's own account, since the fee payer is a required signer for ANY
+ * instruction referencing its account as a signer-role account — and
+ * settle() supplies that signature blindly. Proven exploitable with a
+ * real local PoC (two-instruction tx: a tiny real buyer payment +
+ * a SystemProgram transfer draining 5 SOL from the fee payer to the
+ * attacker) before this function existed.
+ *
+ * Enforces, on the FULLY RESOLVED account list (staticAccounts — this
+ * gateway rejects any transaction using address lookup tables below,
+ * specifically because an unresolved ALT could hide a program from this
+ * check):
+ *   1. Every instruction's program is on the allowlist (SPL Token /
+ *      Token-2022 only — the only program a payment transfer legitimately
+ *      needs).
+ *   2. The fee payer account (index 0) is NEVER referenced inside any
+ *      instruction's account list — its only role in this flow is paying
+ *      the network fee, never being a source/destination/authority of a
+ *      token transfer.
+ * Returns { ok, reason? }.
+ */
+function assertSafeTx(compiledMessage, feePayerAddress) {
+  const staticAccounts = compiledMessage.staticAccounts || []
+  // Address Lookup Tables let a transaction reference additional accounts
+  // (including PROGRAM ids) without listing them in staticAccounts — a
+  // program hidden behind an unresolved ALT would be invisible to the
+  // allowlist check below. Reject outright rather than resolve ALTs here;
+  // this gateway's payment transactions don't need them.
+  if (compiledMessage.addressTableLookups && compiledMessage.addressTableLookups.length > 0) {
+    return { ok: false, reason: 'transactions using address lookup tables are not supported — ALT-referenced accounts (including programs) cannot be safety-checked' }
+  }
+  const feePayerIndex = staticAccounts.indexOf(feePayerAddress)
+  for (const ix of compiledMessage.instructions || []) {
+    const program = staticAccounts[ix.programAddressIndex]
+    if (program !== SPL_TOKEN_PROGRAM && program !== SPL_TOKEN_2022_PROGRAM) {
+      return { ok: false, reason: `instruction targets a non-allowlisted program (${program}) — only the SPL Token/Token-2022 program is permitted in a payment transaction` }
+    }
+    if ((ix.accountIndices || []).includes(feePayerIndex)) {
+      return { ok: false, reason: 'the fee payer account is referenced inside a token-program instruction — the fee payer must only pay the network fee, never be a transfer source/destination/authority' }
+    }
+  }
+  return { ok: true }
+}
+
+/**
  * Verify a buyer's partially-signed transaction matches the advertised
  * PaymentRequirements. Checks (pure decode + compare, no RPC call):
  *   - transaction decodes cleanly
@@ -115,6 +174,9 @@ function decodeTransaction(base64Transaction) {
  *   - the fee payer slot matches COVENANT's configured fee payer address
  *     (a buyer can't point the sponsor slot at a DIFFERENT facilitator
  *     and expect this one to sign it)
+ *   - assertSafeTx: no non-allowlisted program, fee payer never referenced
+ *     inside a token instruction (the P0 anti-drain guard — see its own
+ *     docstring for the exploit this closes)
  * Returns { ok, reason? }.
  */
 async function verify({ transaction, payTo, amount, asset }) {
@@ -134,6 +196,13 @@ async function verify({ transaction, payTo, amount, asset }) {
   if (feePayerAccount !== fp.address) {
     return { ok: false, reason: `transaction's fee payer slot (${feePayerAccount}) does not match this facilitator's configured fee payer (${fp.address}) — this payload was built for a different sponsor` }
   }
+
+  // P0 anti-drain guard — must run BEFORE accepting any signature as
+  // sufficient "buyer authorization". A transaction can have a perfectly
+  // legitimate buyer signature AND a smuggled instruction that drains the
+  // fee payer; the signature check below alone would have accepted it.
+  const safety = assertSafeTx(compiledMessage, feePayerAccount)
+  if (!safety.ok) return { ok: false, reason: safety.reason }
 
   // The fee payer's signature slot must currently be present-but-EMPTY —
   // @solana/kit represents an unsigned slot as `null` (not 64 zero
