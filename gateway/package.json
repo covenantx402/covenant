@@ -12,13 +12,20 @@
   "author": "",
   "license": "MIT",
   "description": "",
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
+    "@solana-program/token": "^0.18.0",
+    "@solana/kit": "^8.5.0",
     "@x402/core": "^2.25.0",
     "better-sqlite3": "^12.11.1",
+    "bs58": "^6.0.0",
     "ethers": "^6.17.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@solana-program/system": "^0.16.0",
     "eslint": "^10.12.0"
   }
 }

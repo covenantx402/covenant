@@ -17,6 +17,16 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'covenant-test-'))
 // so it must open the SAME sqlite file the spawned server process writes to).
 process.env.COVENANT_DB_PATH = path.join(tmp, 'gateway.db')
 
+// A real (but freshly-generated, worthless, devnet-only) Solana fee-payer
+// key so the spawned server's /x402/solana/* endpoints are actually
+// exercised end-to-end rather than permanently 503ing on "not configured".
+const crypto = require('crypto')
+const bs58Mod = require('bs58')
+const bs58 = bs58Mod.default || bs58Mod
+const solanaFeePayerKp = crypto.generateKeyPairSync('ed25519')
+const SOLANA_FEE_PAYER_SEED = solanaFeePayerKp.privateKey.export({ type: 'pkcs8', format: 'der' }).slice(-32)
+const SOLANA_FEE_PAYER_KEY_B58 = bs58.encode(SOLANA_FEE_PAYER_SEED)
+
 function req(method, p, body, headers = {}) {
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null
@@ -42,6 +52,7 @@ function startServer() {
         COVENANT_SETTLE_KEY: '0x' + '11'.repeat(32),
         COVENANT_DB_PATH: path.join(tmp, 'gateway.db'),
         COVENANT_ROUTES_STORE: path.join(tmp, 'routes.json'),
+        COVENANT_SOLANA_FEE_PAYER_KEY: SOLANA_FEE_PAYER_KEY_B58,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -284,6 +295,43 @@ async function main() {
     const claimRes = await req('POST', '/x402/batch/claim', { channelId: openRes.json.channelId })
     assert.strictEqual(claimRes.status, 400)
     assert.ok(/0\.03/.test(claimRes.json.error), `expected the claim error to name the full accumulated 0.03 USDG, got: ${claimRes.json.error}`); ok('POST /x402/batch/claim attempts a single on-chain claim for the full accumulated channel total')
+
+    // Solana "exact" scheme (/x402/solana/*) — build a real partially-
+    // signed devnet transaction and exercise verify()/settle() over HTTP.
+    // settle() will fail at broadcast (no devnet SOL funded for this
+    // throwaway test keypair — public devnet faucets were exhausted
+    // during development, see README "Solana support"), but the CO-SIGN
+    // mechanics (decode -> validate fee payer slot -> add facilitator
+    // signature -> attempt submit) run for real against the fee payer
+    // key, which is the part that regresses silently if ever broken.
+    const kit = require('@solana/kit')
+    const { getTransferSolInstruction } = require('@solana-program/system')
+    const infoRes = await req('GET', '/x402/solana/info')
+    assert.strictEqual(infoRes.status, 200)
+    assert.strictEqual(infoRes.json.configured, true)
+    assert.ok(infoRes.json.feePayer === null, 'feePayer address is only populated once settle() has actually resolved it once — publicView() does not force-resolve it just to answer a status GET'); ok('GET /x402/solana/info reports configured:true once COVENANT_SOLANA_FEE_PAYER_KEY is set')
+
+    const solanaBuyer = await kit.createKeyPairSignerFromPrivateKeyBytes(crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'der' }).slice(-32))
+    const solanaRecipient = await kit.createKeyPairSignerFromPrivateKeyBytes(crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'der' }).slice(-32))
+    const feePayerAddress = (await kit.createKeyPairSignerFromPrivateKeyBytes(SOLANA_FEE_PAYER_SEED)).address
+    const fakeBlockhash = { blockhash: '11111111111111111111111111111111111111111', lastValidBlockHeight: 999999999n }
+    const transferIx = getTransferSolInstruction({ source: solanaBuyer, destination: solanaRecipient.address, amount: 1000n })
+    const solanaMessage = kit.pipe(
+      kit.createTransactionMessage({ version: 0 }),
+      m => kit.setTransactionMessageFeePayerSigner(kit.createNoopSigner(feePayerAddress), m),
+      m => kit.setTransactionMessageLifetimeUsingBlockhash(fakeBlockhash, m),
+      m => kit.appendTransactionMessageInstructions([transferIx], m),
+    )
+    const solanaPartiallySigned = await kit.partiallySignTransactionMessageWithSigners(solanaMessage)
+    const solanaBase64Tx = kit.getBase64EncodedWireTransaction(solanaPartiallySigned)
+
+    const svmVerify = await req('POST', '/x402/solana/verify', { transaction: solanaBase64Tx })
+    assert.strictEqual(svmVerify.status, 200)
+    assert.strictEqual(svmVerify.json.payer, solanaBuyer.address); ok('POST /x402/solana/verify recovers the real buyer address from a partially-signed devnet transaction, no RPC call needed')
+
+    const svmSettle = await req('POST', '/x402/solana/settle', { transaction: solanaBase64Tx })
+    assert.strictEqual(svmSettle.json.success, false)
+    assert.ok(/Solana settle error/.test(svmSettle.json.errorReason), `expected the co-sign step to reach the actual devnet RPC and fail there (fake blockhash/unfunded account), got: ${svmSettle.json.errorReason}`); ok('POST /x402/solana/settle co-signs with the configured fee payer and attempts a real devnet broadcast (fails on fake blockhash/unfunded test account, as expected)')
 
     console.log(`\nSMOKE PASS — ${pass} checks`)
   } finally {
