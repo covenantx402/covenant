@@ -169,6 +169,7 @@ function registerDiscoveryRoutes({
         '/x402/apis': { get: { operationId: 'list_apis', summary: 'Catalog of paid APIs + prices (free)', security: [], responses: { '200': { description: 'JSON catalog' } } } },
         '/x402/marketplace': { get: { operationId: 'list_marketplace', summary: 'Third-party marketplace listings (free)', security: [], responses: { '200': { description: 'JSON catalog' } } } },
         '/facilitator': { get: { operationId: 'facilitator_status', summary: 'Settlement config (free)', security: [], responses: { '200': { description: 'JSON status' } } } },
+        '/supported': { get: { operationId: 'supported_kinds', summary: 'x402 spec-standard facilitator capability discovery: (x402Version, scheme, network) kinds + signer addresses (free). Also at /facilitator/supported.', security: [], responses: { '200': { description: '{ x402Version, kinds[], extensions[], signers{} }' } } } },
         '/health': { get: { operationId: 'health', summary: 'Health check (free)', security: [], responses: { '200': { description: 'ok' } } } },
         '/metrics': { get: { operationId: 'metrics', summary: 'Prometheus text-exposition metrics (free)', security: [], responses: { '200': { description: 'text/plain; version=0.0.4' } } } },
         '/session/redeem': {
@@ -202,6 +203,63 @@ function registerDiscoveryRoutes({
     })
   }
 
+  /* GET /supported — the x402 spec's facilitator-capability discovery
+     endpoint (see docs.cdp.coinbase.com, developers.circle.com,
+     the legacy x402 facilitator-http transport spec). A generic x402
+     client is supposed to hit this FIRST to learn which (x402Version,
+     scheme, network) combinations a facilitator can verify/settle,
+     before ever building a PaymentIntent — COVENANT had GET /chains for
+     the same job but in a COVENANT-specific shape, which a spec-generic
+     client doesn't know to look for. This mirrors the spec's documented
+     shape (kinds[], extensions[], signers{}) built from the same live
+     chain registry /chains uses, so the two never drift out of sync.
+     Exposed at both the bare spec path (/supported) and under this
+     gateway's /facilitator/* convention (/facilitator/supported) since
+     COVENANT's other facilitator ops (verify/settle/status) all live
+     under that prefix — callers that guessed either path find it. */
+  async function supported(req, res) {
+    const chainList = facilitator.chains.listChains()
+    const kinds = []
+    const signers = {}
+    for (const c of chainList) {
+      const network = `eip155:${c.id}`
+      // publicView() constructs a provider for the chain's RPC env var,
+      // which throws if that chain simply isn't configured here (e.g. a
+      // deployment that only set up Robinhood + Ethereum, skipping
+      // Base/Arbitrum). That's an expected, non-fatal state — the chain
+      // still belongs in `kinds` (it's a scheme/network COVENANT CAN
+      // support, code-wise), it just has no live signer address to list
+      // yet. Swallow it as "no view available" rather than 500ing the
+      // whole discovery response over one unconfigured chain.
+      let view = {}
+      try { view = facilitator.publicView(c.id) } catch (_e) { /* chain not configured — kinds entry still included */ }
+      kinds.push({
+        x402Version: 1,
+        scheme: 'exact',
+        network,
+        asset: c.usdc,
+        extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION },
+      })
+      kinds.push({
+        x402Version: 1,
+        scheme: 'covenant-session',
+        network,
+        asset: c.usdc,
+        extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION, calls: 100, ttlSec: 3600 },
+      })
+      if (view.spender) signers[network] = [view.spender]
+    }
+    send(res, 200, {
+      x402Version: 1,
+      kinds,
+      // bazaar: discovery extension is live on at least one route
+      // (/x402/premium) today — see openapi() above for the fuller
+      // per-route coverage status.
+      extensions: ['bazaar'],
+      signers,
+    })
+  }
+
   // Returns true if the request was handled (caller should `return`
   // immediately after), false if no discovery route matched.
   async function handle(req, res, url) {
@@ -212,6 +270,7 @@ function registerDiscoveryRoutes({
     if (url === '/favicon.ico' || url === '/favicon.svg') { favicon(req, res); return true }
     if (url === '/openapi.json') { openapi(req, res); return true }
     if (url === '/.well-known/x402') { wellKnown(req, res); return true }
+    if (url === '/supported' || url === '/facilitator/supported') { await supported(req, res); return true }
     return false
   }
 
