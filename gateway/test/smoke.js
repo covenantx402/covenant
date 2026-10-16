@@ -305,17 +305,24 @@ async function main() {
     // signature -> attempt submit) run for real against the fee payer
     // key, which is the part that regresses silently if ever broken.
     const kit = require('@solana/kit')
-    const { getTransferSolInstruction } = require('@solana-program/system')
+    const { getTransferCheckedInstruction } = require('@solana-program/token')
     const infoRes = await req('GET', '/x402/solana/info')
     assert.strictEqual(infoRes.status, 200)
     assert.strictEqual(infoRes.json.configured, true)
     assert.ok(infoRes.json.feePayer === null, 'feePayer address is only populated once settle() has actually resolved it once — publicView() does not force-resolve it just to answer a status GET'); ok('GET /x402/solana/info reports configured:true once COVENANT_SOLANA_FEE_PAYER_KEY is set')
 
     const solanaBuyer = await kit.createKeyPairSignerFromPrivateKeyBytes(crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'der' }).slice(-32))
-    const solanaRecipient = await kit.createKeyPairSignerFromPrivateKeyBytes(crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'der' }).slice(-32))
+    const buyerTokenAccount = await kit.createKeyPairSignerFromPrivateKeyBytes(crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'der' }).slice(-32))
+    const merchantTokenAccount = await kit.createKeyPairSignerFromPrivateKeyBytes(crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'der' }).slice(-32))
+    const solanaMint = await kit.createKeyPairSignerFromPrivateKeyBytes(crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'der' }).slice(-32))
     const feePayerAddress = (await kit.createKeyPairSignerFromPrivateKeyBytes(SOLANA_FEE_PAYER_SEED)).address
     const fakeBlockhash = { blockhash: '11111111111111111111111111111111111111111', lastValidBlockHeight: 999999999n }
-    const transferIx = getTransferSolInstruction({ source: solanaBuyer, destination: solanaRecipient.address, amount: 1000n })
+    // A real SPL TransferChecked instruction — this gateway's anti-drain
+    // guard (assertSafeTx, see solana.js) only allows SPL Token/Token-2022
+    // program instructions; a plain SystemProgram transfer is correctly
+    // rejected now (see test/unit/solana.test.js for the dedicated P0
+    // regression tests covering that guard directly).
+    const transferIx = getTransferCheckedInstruction({ source: buyerTokenAccount.address, mint: solanaMint.address, destination: merchantTokenAccount.address, authority: solanaBuyer, amount: 1000n, decimals: 6 })
     const solanaMessage = kit.pipe(
       kit.createTransactionMessage({ version: 0 }),
       m => kit.setTransactionMessageFeePayerSigner(kit.createNoopSigner(feePayerAddress), m),
@@ -326,12 +333,30 @@ async function main() {
     const solanaBase64Tx = kit.getBase64EncodedWireTransaction(solanaPartiallySigned)
 
     const svmVerify = await req('POST', '/x402/solana/verify', { transaction: solanaBase64Tx })
-    assert.strictEqual(svmVerify.status, 200)
+    assert.strictEqual(svmVerify.status, 200, JSON.stringify(svmVerify.json))
     assert.strictEqual(svmVerify.json.payer, solanaBuyer.address); ok('POST /x402/solana/verify recovers the real buyer address from a partially-signed devnet transaction, no RPC call needed')
 
     const svmSettle = await req('POST', '/x402/solana/settle', { transaction: solanaBase64Tx })
     assert.strictEqual(svmSettle.json.success, false)
     assert.ok(/Solana settle error/.test(svmSettle.json.errorReason), `expected the co-sign step to reach the actual devnet RPC and fail there (fake blockhash/unfunded account), got: ${svmSettle.json.errorReason}`); ok('POST /x402/solana/settle co-signs with the configured fee payer and attempts a real devnet broadcast (fails on fake blockhash/unfunded test account, as expected)')
+
+    // P0 regression at the HTTP layer too: a smuggled SystemProgram
+    // instruction alongside this same legit payment must be rejected by
+    // the live endpoint, not just the unit-level function.
+    const { getTransferSolInstruction } = require('@solana-program/system')
+    const attackerSigner = await kit.createKeyPairSignerFromPrivateKeyBytes(crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'der' }).slice(-32))
+    const drainIx = getTransferSolInstruction({ source: kit.createNoopSigner(feePayerAddress), destination: attackerSigner.address, amount: 5_000_000_000n })
+    const drainMessage = kit.pipe(
+      kit.createTransactionMessage({ version: 0 }),
+      m => kit.setTransactionMessageFeePayerSigner(kit.createNoopSigner(feePayerAddress), m),
+      m => kit.setTransactionMessageLifetimeUsingBlockhash(fakeBlockhash, m),
+      m => kit.appendTransactionMessageInstructions([transferIx, drainIx], m),
+    )
+    const drainPartiallySigned = await kit.partiallySignTransactionMessageWithSigners(drainMessage)
+    const drainBase64Tx = kit.getBase64EncodedWireTransaction(drainPartiallySigned)
+    const drainVerify = await req('POST', '/x402/solana/verify', { transaction: drainBase64Tx })
+    assert.strictEqual(drainVerify.status, 400, 'CRITICAL: a transaction smuggling a fee-payer-draining instruction alongside a real payment must be rejected over HTTP, not just at the unit level')
+    assert.ok(/non-allowlisted program/.test(drainVerify.json.error)); ok('[P0 regression, HTTP layer] POST /x402/solana/verify rejects a real payment transaction that also smuggles a fee-payer-draining instruction')
 
     console.log(`\nSMOKE PASS — ${pass} checks`)
   } finally {
