@@ -196,6 +196,19 @@ async function main() {
     assert.ok(v2.accepts.every(a => typeof a.amount === 'string' && a.maxAmountRequired === undefined)); ok('v2 accepts use amount, not maxAmountRequired')
     assert.ok(v2.extensions && v2.extensions.bazaar && v2.extensions.bazaar.info); ok('v2 header carries extensions.bazaar discovery block')
 
+    // GET /supported — x402 spec facilitator-capability discovery endpoint
+    // (the same shape Coinbase CDP / Circle / the legacy facilitator-http
+    // transport spec use: kinds[], extensions[], signers{}).
+    const sup = await req('GET', '/supported')
+    assert.strictEqual(sup.status, 200)
+    assert.strictEqual(sup.json.x402Version, 1)
+    assert.ok(Array.isArray(sup.json.kinds) && sup.json.kinds.length > 0)
+    assert.ok(sup.json.kinds.every(k => k.scheme && k.network && k.asset))
+    assert.ok(sup.json.kinds.some(k => k.network === 'eip155:4663' && k.scheme === 'exact')); ok('GET /supported lists exact/eip155:4663 as a supported kind')
+    const supAlias = await req('GET', '/facilitator/supported')
+    assert.strictEqual(supAlias.status, 200)
+    assert.deepStrictEqual(supAlias.json.kinds, sup.json.kinds); ok('GET /facilitator/supported alias matches /supported exactly')
+
     console.log(`\nSMOKE PASS — ${pass} checks`)
   } finally {
     server.kill()
