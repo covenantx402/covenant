@@ -80,6 +80,21 @@ async function main() {
     const w = await req('POST', '/wallets/create', { label: 'w1' }, AUTH)
     assert.strictEqual(w.status, 201); assert.ok(w.json.address.startsWith('0x')); ok('wallet created')
 
+    // vault/wallet isolation: a second agent key must not see agent 1's
+    // secrets or wallets — each is scoped to its owning key, not global.
+    const mint2 = await req('POST', '/keys', { label: 'smoke2' })
+    const AUTH2 = { Authorization: 'Bearer ' + mint2.json.key }
+    const brokerAsAgent2 = await req('POST', '/vault/broker', { text: '{{sec1}}' }, AUTH2)
+    assert.strictEqual(brokerAsAgent2.json.body, '{{sec1}}') // placeholder left unresolved, not agent 1's secret
+    assert.strictEqual(brokerAsAgent2.json.used.length, 0)
+    const vaultListAsAgent2 = await req('GET', '/vault/entries', null, AUTH2)
+    assert.deepStrictEqual(vaultListAsAgent2.json, [])
+    const walletsAsAgent2 = await req('GET', '/wallets', null, AUTH2)
+    assert.deepStrictEqual(walletsAsAgent2.json, [])
+    const vaultListAsAgent1 = await req('GET', '/vault/entries', null, AUTH)
+    assert.strictEqual(vaultListAsAgent1.json.length, 2) // sec1 + the wallet's own vault-stored private key
+    ok('vault + wallet isolation: agent 2 cannot see agent 1 secrets or wallets')
+
     // restart persistence
     server.kill()
     await delay(400)

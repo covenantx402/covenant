@@ -1,0 +1,10 @@
+node_modules
+kit/node_modules
+kit/dist
+gateway/node_modules
+gateway/data
+.git
+*.log
+.env
+.env.*
+!gateway/.env.example
