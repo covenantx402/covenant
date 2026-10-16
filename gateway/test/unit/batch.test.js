@@ -102,6 +102,60 @@ function run() {
       ok('a second claim after new vouchers only claims the NET-NEW delta, never re-claims the already-settled portion')
     }
 
+    // -- storage-growth hardening: an expired channel that was opened but
+    //    NEVER used (no vouchers verified, nothing claimed) is swept away
+    //    on the next openChannel() call. A channel that WAS used (even if
+    //    expired) keeps its history — only truly-abandoned channels are
+    //    garbage-collected. --
+    {
+      const abandoned = batch.openChannel({ payer: wallet.address, payTo, chainId: 4663, validForSec: 60 })
+      // can't easily fast-forward real time in a unit test, so directly
+      // age the row past its validBefore via a raw UPDATE — equivalent to
+      // waiting out the 60s window, without actually waiting 60s.
+      require('../../db').prepare('UPDATE batch_channels SET valid_before = ? WHERE id = ?').run(Math.floor(Date.now() / 1000) - 10, abandoned.channelId)
+      assert.ok(batch.getChannel(abandoned.channelId), 'abandoned channel still exists before the sweep runs')
+
+      batch.openChannel({ payer: wallet.address, payTo, chainId: 4663 }) // triggers the sweep as a side effect
+      assert.strictEqual(batch.getChannel(abandoned.channelId), null, 'an expired, never-used channel must be swept away by the next openChannel() call')
+      ok('an expired channel with zero activity is garbage-collected on the next openChannel() call (storage-growth hardening)')
+
+      // a USED channel (even if expired) must survive the sweep — its
+      // settlement history is real data, not abandonment.
+      const used = batch.openChannel({ payer: wallet.address, payTo, chainId: 4663, validForSec: 60 })
+      const sigUsed = await signVoucher(used, 500)
+      batch.verifyVoucher({ ethers, channelId: used.channelId, cumulativeValue: '500', signature: sigUsed })
+      require('../../db').prepare('UPDATE batch_channels SET valid_before = ? WHERE id = ?').run(Math.floor(Date.now() / 1000) - 10, used.channelId)
+      batch.openChannel({ payer: wallet.address, payTo, chainId: 4663 }) // triggers the sweep again
+      assert.ok(batch.getChannel(used.channelId), 'a channel that actually accumulated a voucher must survive the sweep even after expiring')
+      ok('an expired channel that WAS used (has real accumulated value) is NOT swept — only zero-activity abandonment is garbage-collected')
+    }
+
+    // -- [P0-adjacent regression] per-channel claim lock. Found by audit:
+    //    two concurrent POST /x402/batch/claim requests for the same
+    //    channel both read the same net-claimable amount before either
+    //    recorded its claim — both would have executed a real on-chain
+    //    transferFrom, overcharging the buyer beyond what any single
+    //    cumulative voucher total actually authorized. Verified live
+    //    over HTTP (5 concurrent requests, exactly 1 proceeded past the
+    //    lock) before this fix; this test locks the mechanism itself. --
+    {
+      const ch = batch.openChannel({ payer: wallet.address, payTo, chainId: 4663 })
+      assert.strictEqual(batch.tryLockChannel(ch.channelId), true, 'first lock attempt on an unlocked channel succeeds')
+      assert.strictEqual(batch.tryLockChannel(ch.channelId), false, 'CRITICAL: a second concurrent lock attempt on the SAME channel while still held must fail — this is the exact condition that let two claims double-spend the same voucher total')
+      batch.unlockChannel(ch.channelId)
+      assert.strictEqual(batch.tryLockChannel(ch.channelId), true, 'after unlocking, a fresh lock attempt succeeds again')
+      batch.unlockChannel(ch.channelId)
+      ok('[race-condition regression] tryLockChannel/unlockChannel correctly serializes concurrent claim attempts on the same channel')
+
+      // locks on DIFFERENT channels must never block each other
+      const ch2 = batch.openChannel({ payer: wallet.address, payTo, chainId: 4663 })
+      assert.strictEqual(batch.tryLockChannel(ch.channelId), true)
+      assert.strictEqual(batch.tryLockChannel(ch2.channelId), true, 'locking one channel must never block locking a DIFFERENT channel')
+      batch.unlockChannel(ch.channelId)
+      batch.unlockChannel(ch2.channelId)
+      ok('the claim lock is per-channel, not global — concurrent claims on different channels never contend')
+    }
+
     console.log(`\nUNIT PASS (batch) — ${pass} checks`)
   })()
 }

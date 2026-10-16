@@ -514,11 +514,22 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && url === '/x402/batch/claim') {
     readBody(req, async (err, payload) => {
       if (err) { send(res, 400, { error: 'bad json' }); return }
-      const nc = batch.netClaimable(payload.channelId)
-      if (!nc.ok) { send(res, 400, { error: nc.reason }); return }
-      const result = await facilitator.claimChannel({ payer: nc.channel.payer, payTo: nc.channel.payTo, netValue: nc.netValue, chainId: nc.channel.chainId })
-      if (result.success) batch.recordClaim(payload.channelId, result.transaction, !!payload.close)
-      send(res, result.success ? 200 : 400, result.success ? { ...result, channelId: payload.channelId, totalClaimed: nc.totalValue } : { error: result.errorReason })
+      // Anti-double-claim lock: found by audit — two concurrent requests
+      // for the same channel would both read the same net-claimable
+      // amount and both execute a real on-chain transferFrom for it,
+      // overcharging the buyer beyond any single voucher's cumulative
+      // total. The lock must cover the whole flow (check -> await the
+      // on-chain call -> record), not just the DB read.
+      if (!batch.tryLockChannel(payload.channelId)) { send(res, 409, { error: 'a claim for this channel is already in progress — retry shortly' }); return }
+      try {
+        const nc = batch.netClaimable(payload.channelId)
+        if (!nc.ok) { send(res, 400, { error: nc.reason }); return }
+        const result = await facilitator.claimChannel({ payer: nc.channel.payer, payTo: nc.channel.payTo, netValue: nc.netValue, chainId: nc.channel.chainId })
+        if (result.success) batch.recordClaim(payload.channelId, result.transaction, !!payload.close)
+        send(res, result.success ? 200 : 400, result.success ? { ...result, channelId: payload.channelId, totalClaimed: nc.totalValue } : { error: result.errorReason })
+      } finally {
+        batch.unlockChannel(payload.channelId)
+      }
     })
     return
   }
