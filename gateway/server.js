@@ -568,7 +568,14 @@ const server = http.createServer(async (req, res) => {
     if (!facilitator.isConfigured(chainId)) { send(res, 503, { error: `chain unavailable: settlement RPC is not configured for ${facilitator.chains.getChain(chainId).name}` }); return }
     const chain = facilitator.chains.getChain(chainId)
     const payTo = facilitator.publicView(chainId).spender || process.env.COVENANT_X402_PAYTO || '0x0000000000000000000000000000000000000000'
-    const priceAtomic = String(10n ** BigInt(chain.decimals - 2)) // 0.01 unit in this chain's decimals
+    // Price the sample at max(0.01, this chain's settlement-cost floor) —
+    // a flat 0.01 on every chain used to challenge below Ethereum's floor
+    // ($0.05), which facilitator.settle() now rejects outright: the agent
+    // would sign and "pay" a challenge that can never actually settle.
+    // Pick whichever is higher so cheap chains (Robinhood/Base/Arbitrum)
+    // keep the familiar $0.01 sample price unchanged.
+    const samplePriceUsd = Math.max(0.01, chain.minSettlePriceUsd)
+    const priceAtomic = String(BigInt(Math.round(samplePriceUsd * 10 ** chain.decimals)))
     const body = {
       x402Version: 1,
       error: 'PAYMENT_REQUIRED',
@@ -577,7 +584,7 @@ const server = http.createServer(async (req, res) => {
         network: `eip155:${chainId}`,
         maxAmountRequired: priceAtomic,
         resource: PUBLIC_ORIGIN + '/x402/premium' + (chainParam ? `?chain=${chainId}` : ''),
-        description: `COVENANT premium alert sample — 0.01 ${chain.usdcSymbol} on ${chain.name}`,
+        description: `COVENANT premium alert sample — ${samplePriceUsd} ${chain.usdcSymbol} on ${chain.name}`,
         mimeType: 'application/json',
         payTo,
         maxTimeoutSeconds: 60,
@@ -590,7 +597,7 @@ const server = http.createServer(async (req, res) => {
         network: `eip155:${chainId}`,
         maxAmountRequired: priceAtomic,
         resource: 'session',
-        description: `COVENANT session — 0.01 ${chain.usdcSymbol} for 100 calls / 1h on ${chain.name} (set extra.calls/ttlSec to customize)`,
+        description: `COVENANT session — ${samplePriceUsd} ${chain.usdcSymbol} for 100 calls / 1h on ${chain.name} (set extra.calls/ttlSec to customize)`,
         mimeType: 'application/json',
         payTo,
         maxTimeoutSeconds: 60,
@@ -598,7 +605,7 @@ const server = http.createServer(async (req, res) => {
         extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION, chainId, spender: payTo, calls: 100, ttlSec: 3600 }
       }]
     }
-    x402r.log('402', { slug: 'premium', path: '/premium', price: '0.01' })
+    x402r.log('402', { slug: 'premium', path: '/premium', price: String(samplePriceUsd) })
     send402(res, body)
     return
   }

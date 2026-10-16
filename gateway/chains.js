@@ -24,6 +24,9 @@ const CHAINS = {
     usdcSymbol: 'USDG',
     decimals: 6,
     explorer: 'https://scan.robinhood.com', // best-effort, not verified this session
+    // Robinhood's native gas token has no meaningful external USD market —
+    // settlement cost here rounds to zero in any realistic pricing model.
+    minSettlePriceUsd: 0,
   },
   1: {
     id: 1,
@@ -35,6 +38,14 @@ const CHAINS = {
     usdcSymbol: 'USDC',
     decimals: 6,
     explorer: 'https://etherscan.io',
+    // Ethereum L1 settlement gas is the most expensive rail here by a wide
+    // margin. Measured ~55,000 gas per transferFrom settlement at ~0.16
+    // gwei (2026-10-16 spot check) -> ~$0.028 at ETH≈$3,200. Floor set at
+    // 2x that spot measurement (gas price is volatile) so a price above
+    // the floor has real margin, not just break-even. Revisit if gas price
+    // or ETH/USD moves materially — this is a static guard, not a live
+    // oracle, by design (no price-feed dependency for a protective floor).
+    minSettlePriceUsd: 0.05,
   },
   8453: {
     id: 8453,
@@ -46,6 +57,9 @@ const CHAINS = {
     usdcSymbol: 'USDC',
     decimals: 6,
     explorer: 'https://basescan.org',
+    // L2 settlement, cheap: measured ~$0.001/settle (2026-10-16). Floor at
+    // 10x spot for real margin against gas-price spikes.
+    minSettlePriceUsd: 0.01,
   },
   42161: {
     id: 42161,
@@ -57,6 +71,9 @@ const CHAINS = {
     usdcSymbol: 'USDC',
     decimals: 6,
     explorer: 'https://arbiscan.io',
+    // L2 settlement, cheap: measured ~$0.0035/settle (2026-10-16). Floor at
+    // ~6x spot for real margin against gas-price spikes.
+    minSettlePriceUsd: 0.02,
   },
 }
 
@@ -84,4 +101,16 @@ function listChains() {
   return Object.values(CHAINS)
 }
 
-module.exports = { CHAINS, DEFAULT_CHAIN_ID, isSupported, getChain, listChains }
+// Treats a price (decimal USDC/USDG string) as "below the settlement-cost
+// floor" for a chain if it's cheaper than minSettlePriceUsd. USDC/USDG are
+// both ~$1-pegged stablecoins, so the decimal price string IS the USD
+// value — no price-feed lookup needed. Used to stop /x402/apis route
+// registration and the free playground (/x402/premium) default from
+// quietly losing money settling a sub-gas-cost price on an expensive
+// chain; callers decide whether a violation is a hard reject or a warning.
+function clearsSettleFloor(price, chainId) {
+  const c = getChain(chainId)
+  return Number(price) >= c.minSettlePriceUsd
+}
+
+module.exports = { CHAINS, DEFAULT_CHAIN_ID, isSupported, getChain, listChains, clearsSettleFloor }

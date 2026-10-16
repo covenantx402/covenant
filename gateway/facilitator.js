@@ -282,10 +282,32 @@ async function verify(intent, signature, chainId = DEFAULT_CHAIN_ID) {
  */
 async function settle(intent, signature, splits = null, chainId = DEFAULT_CHAIN_ID) {
   const id = Number(chainId)
+  const c = chains.getChain(id)
+
+  // Settlement-cost floor: USDC/USDG are ~$1-pegged, so the formatted
+  // decimal amount IS the USD price — no oracle needed. A price below the
+  // chain's minSettlePriceUsd means the facilitator pays MORE in gas than
+  // it receives; that's a silent-loss bug, not a feature, so reject it
+  // loudly before verify() spends an RPC round-trip (balance/allowance
+  // reads) on a payment that was never going to settle. This is a floor
+  // on what COVENANT will settle, not a separate line-item fee — the
+  // full signed amount still goes to payTo; it just can't be priced
+  // below the chain's own settlement cost. See chains.js for the
+  // per-chain floor values and how they were measured. Deliberately
+  // checked against intent.value directly (not v.ok's resolved payer)
+  // so a bad price is rejected even before signature/balance checks run.
+  const priceUsd = Number(ethers.formatUnits(BigInt(intent?.value || 0), c.decimals))
+  if (!chains.clearsSettleFloor(priceUsd, id)) {
+    return {
+      success: false,
+      errorReason: `price too low to settle on ${c.name}: ${priceUsd} ${c.usdcSymbol} is below the ${c.minSettlePriceUsd} ${c.usdcSymbol} settlement-cost floor for this chain (gas would cost more than the payment) — price the resource higher, or settle on a cheaper chain (see GET /chains)`,
+      payer: intent?.from || null,
+    }
+  }
+
   const v = await verify(intent, signature, id)
   if (!v.ok) return { success: false, errorReason: v.reason, payer: v.payer || null }
 
-  const c = chains.getChain(id)
   const w = settlementWallet(id)
   if (!w) return { success: false, errorReason: 'settlement wallet not configured' }
 

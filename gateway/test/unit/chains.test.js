@@ -53,4 +53,31 @@ const ok = (name) => { pass++; console.log('  ✓', name) }
   ok('no two chains share the same usdc contract address')
 }
 
+// -- every chain has a minSettlePriceUsd, and it's never negative --
+{
+  const list = chains.listChains()
+  for (const c of list) {
+    assert.ok(typeof c.minSettlePriceUsd === 'number', `${c.key}: minSettlePriceUsd must be a number`)
+    assert.ok(c.minSettlePriceUsd >= 0, `${c.key}: minSettlePriceUsd must not be negative`)
+  }
+  ok('every chain has a non-negative minSettlePriceUsd')
+}
+
+// -- clearsSettleFloor: the actual gate used before every settlement --
+{
+  // Robinhood's floor is 0 — anything settles, including free/$0.
+  assert.strictEqual(chains.clearsSettleFloor(0, 4663), true, 'Robinhood: $0 clears a $0 floor')
+  assert.strictEqual(chains.clearsSettleFloor(0.001, 4663), true, 'Robinhood: any positive price clears')
+  // Ethereum has the highest floor (most expensive settlement gas).
+  assert.strictEqual(chains.clearsSettleFloor(0.01, 1), false, '$0.01 is below Ethereum\'s $0.05 floor — must reject')
+  assert.strictEqual(chains.clearsSettleFloor(0.05, 1), true, 'exactly at the floor clears (>=, not >)')
+  assert.strictEqual(chains.clearsSettleFloor(1, 1), true, 'well above the floor clears')
+  // Base/Arbitrum: cheaper rails, lower floors than Ethereum.
+  assert.strictEqual(chains.clearsSettleFloor(0.005, 8453), false, 'below Base\'s floor — reject')
+  assert.strictEqual(chains.clearsSettleFloor(0.01, 8453), true, 'at Base\'s floor — clears')
+  assert.ok(chains.getChain(1).minSettlePriceUsd > chains.getChain(8453).minSettlePriceUsd,
+    'Ethereum L1 floor must be higher than Base L2 floor — gas cost ordering must stay correct if prices are retuned')
+  ok('clearsSettleFloor correctly gates prices against each chain\'s settlement-cost floor')
+}
+
 console.log(`\nUNIT PASS (chains) — ${pass} checks`)

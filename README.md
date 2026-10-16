@@ -126,6 +126,46 @@ None of the four supported chains' stablecoin deployments implement EIP-3009 `tr
 
 Every settlement is replay-guarded by a persisted `(chain_id, nonce)` pair and auditable by tx hash. Set `resource: "session"` instead to open a 100-call / 1h prepaid session in the same settle call — see [`/x402/premium`'s `x-payment-info.protocols[1]`](#why-this-isnt-just-a-402-demo).
 
+## Who pays gas, and the per-chain price floor
+
+Buyers never submit an on-chain transaction or hold a gas token — they only
+*sign* an off-chain EIP-712 authorization (free). The **facilitator**
+(COVENANT's settlement wallet) submits the on-chain `transferFrom` and pays
+that gas. This is the same split every x402 facilitator uses (Coinbase CDP,
+PayAI, Dexter, etc.) — it's what "gasless payment" means in this protocol,
+not something COVENANT does differently.
+
+What differs between facilitators is how (or whether) they recover that gas
+cost. Coinbase CDP charges the seller a flat `$0.001` per on-chain
+settlement after a free tier; PayAI marks gas up ~30%; Dexter, like
+COVENANT's core routes, charges nothing extra. Because the full signed
+`payTo` amount already lands on COVENANT's own wallet for its own routes
+(no separate processor fee line), a price set below what gas actually
+costs on a given chain is a straightforward loss on every call — so
+`POST /facilitator/settle` enforces a **per-chain minimum price** and
+rejects anything under it before touching the chain at all:
+
+| Chain | Measured settlement gas cost (2026-10-16 spot check) | Enforced floor |
+|---|---|---|
+| Robinhood (4663) | negligible (no external USD market for native gas) | none ($0) |
+| Base | ~$0.001 | $0.01 |
+| Arbitrum One | ~$0.0035 | $0.02 |
+| Ethereum | ~$0.028 | $0.05 |
+
+The floor is a static guard (not a live gas-price oracle) sized with
+headroom over the spot measurement, so it won't false-positive on normal
+gas fluctuation — see `chains.js`'s `minSettlePriceUsd` per chain if you
+fork this and need to retune it for your own gas-price environment. A
+rejected settlement returns a clear `errorReason` naming the floor and
+pointing at `GET /chains` for a cheaper rail; it never silently takes a
+loss-making payment. The `/x402/premium` playground's sample price is
+`max($0.01, that chain's floor)` for the same reason — it won't hand out a
+challenge it can't actually settle.
+
+Third-party marketplace listings (`/x402/marketplace/*`, not COVENANT's own
+routes) are the other place COVENANT keeps a cut: `COVENANT_MARKETPLACE_FEE_BPS`
+(default 500 = 5%) of each sale, split server-side after delivery.
+
 ## Gateway endpoints
 
 **Discovery (free, no auth):**
