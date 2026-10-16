@@ -4,6 +4,7 @@
   "main": "agent-vault.js",
   "scripts": {
     "test": "node test/smoke.js",
+    "test:unit": "node test/unit/run-all.js",
     "lint": "eslint .",
     "start": "node server.js"
   },
