@@ -201,6 +201,32 @@ function registerDiscoveryRoutes({
             security: [], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
             responses: { '200': { description: 'session status' }, '404': { description: 'unknown or expired' } }
           }
+        },
+        '/x402/batch/open': {
+          post: {
+            operationId: 'batch_open', summary: 'x402 "batch-settlement" scheme: open a running-tab channel (free)',
+            description: 'See README "Batch settlement" section for the honest framing — this is NOT a full escrow-contract payment channel, it\'s vouchers verified off-chain accumulated into one on-chain claim. Returns the EIP-712 domain/types to sign vouchers against.',
+            security: [], responses: { '201': { description: '{ channelId, payer, payTo, validBefore, domain, types }' } }
+          }
+        },
+        '/x402/batch/voucher': {
+          post: {
+            operationId: 'batch_voucher', summary: 'Verify a signed cumulative voucher against an open channel — pure signature + monotonic check, NO on-chain call, genuinely free',
+            security: [], responses: { '200': { description: '{ ok: true, cumulativeValue, vouchersVerified }' }, '400': { description: 'unknown/closed/expired channel, non-increasing cumulativeValue, or signature mismatch' } }
+          }
+        },
+        '/x402/batch/claim': {
+          post: {
+            operationId: 'batch_claim', summary: 'Claim the net-new accumulated value on-chain: ONE transferFrom regardless of how many vouchers were verified',
+            security: [], responses: { '200': { description: '{ success: true, transaction, claimedValue }' }, '400': { description: 'nothing new to claim, or the usual balance/allowance/settlement-floor failures' } }
+          }
+        },
+        '/x402/batch/channel/{id}': {
+          get: {
+            operationId: 'batch_channel_status', summary: 'Channel status (accumulated total, vouchers verified, claimed-so-far)',
+            security: [], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+            responses: { '200': { description: 'channel record' }, '404': { description: 'unknown channel' } }
+          }
         }
       }
     })
@@ -272,6 +298,20 @@ function registerDiscoveryRoutes({
         network,
         asset: c.usdc,
         extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION },
+      })
+      // "batch-settlement" via /x402/batch/* — a running-tab channel, not
+      // a full escrow-contract payment channel (see batch.js for the
+      // honest framing). receiverAuthorizer here is the facilitator's own
+      // settlement wallet, not a separate on-chain authorizer contract,
+      // since claims execute the same approve+transferFrom every other
+      // scheme on this gateway uses rather than a dedicated channel
+      // contract's claim() method.
+      kinds.push({
+        x402Version: 1,
+        scheme: 'batch-settlement',
+        network,
+        asset: c.usdc,
+        extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION, receiverAuthorizer: view.spender || null, withdrawDelay: null },
       })
       if (view.spender) signers[network] = [view.spender]
     }

@@ -251,6 +251,40 @@ async function main() {
     assert.strictEqual(tamperSettle.json.success, false)
     assert.ok(/signature does not match/.test(tamperSettle.json.errorReason), `tampering the bound text after signing must fail signature verification, got: ${tamperSettle.json.errorReason}`); ok('tampering the signed resource\'s bound text after signing is rejected (signature mismatch)')
 
+    // "batch-settlement" scheme (/x402/batch/*) — open a channel, verify
+    // 2 vouchers off-chain (free, no RPC), confirm the HTTP-level flow
+    // matches the direct batch.js unit tests (test/unit/batch.test.js
+    // covers the deeper monotonic/signature-mismatch edge cases).
+    const batchWallet = ethers.Wallet.createRandom()
+    const openRes = await req('POST', '/x402/batch/open', { payer: batchWallet.address, chainId: 4663 })
+    assert.strictEqual(openRes.status, 201)
+    assert.ok(/^0x[0-9a-f]{64}$/.test(openRes.json.channelId)); ok('POST /x402/batch/open returns a usable channel + signing domain/types')
+
+    const voucher1 = { channelId: openRes.json.channelId, payer: openRes.json.payer, payTo: openRes.json.payTo, cumulativeValue: '10000', validBefore: String(openRes.json.validBefore) }
+    const voucherSig1 = await batchWallet.signTypedData(openRes.json.domain, openRes.json.types, voucher1)
+    const v1Res = await req('POST', '/x402/batch/voucher', { channelId: openRes.json.channelId, cumulativeValue: '10000', signature: voucherSig1 })
+    assert.strictEqual(v1Res.status, 200)
+    assert.strictEqual(v1Res.json.vouchersVerified, 1)
+
+    const voucher2 = { ...voucher1, cumulativeValue: '30000' }
+    const voucherSig2 = await batchWallet.signTypedData(openRes.json.domain, openRes.json.types, voucher2)
+    const v2Res = await req('POST', '/x402/batch/voucher', { channelId: openRes.json.channelId, cumulativeValue: '30000', signature: voucherSig2 })
+    assert.strictEqual(v2Res.status, 200)
+    assert.strictEqual(v2Res.json.vouchersVerified, 2); ok('POST /x402/batch/voucher verifies 2 vouchers over HTTP, both free (no on-chain activity between them)')
+
+    const statusRes = await req('GET', '/x402/batch/channel/' + openRes.json.channelId)
+    assert.strictEqual(statusRes.status, 200)
+    assert.strictEqual(statusRes.json.lastCumulativeValue, '30000')
+    assert.strictEqual(statusRes.json.vouchersVerified, 2); ok('GET /x402/batch/channel/:id reflects both verified vouchers')
+
+    // Claim fails (fresh wallet, zero balance) but the error correctly
+    // names the FULL accumulated amount (30000, not a per-voucher amount)
+    // — proving the claim batches the whole channel into one would-be
+    // transferFrom instead of settling per-voucher.
+    const claimRes = await req('POST', '/x402/batch/claim', { channelId: openRes.json.channelId })
+    assert.strictEqual(claimRes.status, 400)
+    assert.ok(/0\.03/.test(claimRes.json.error), `expected the claim error to name the full accumulated 0.03 USDG, got: ${claimRes.json.error}`); ok('POST /x402/batch/claim attempts a single on-chain claim for the full accumulated channel total')
+
     console.log(`\nSMOKE PASS — ${pass} checks`)
   } finally {
     server.kill()

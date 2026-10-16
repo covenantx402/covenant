@@ -232,6 +232,30 @@ CREATE TABLE IF NOT EXISTS marketplace_nonces (
   nonce TEXT PRIMARY KEY,
   t INTEGER NOT NULL
 );
+
+-- x402 "batch-settlement" scheme: off-chain-verified vouchers accumulated
+-- into ONE on-chain settlement instead of one settlement per request.
+-- Explicitly NOT a full bidirectional payment channel contract (no
+-- on-chain escrow deposit, no non-cooperative-withdraw dispute timer like
+-- CDP's channel spec) — it's a simpler "running tab" on top of the same
+-- approve+transferFrom pattern every other route here uses: the buyer's
+-- safety valve is revoking the ERC-20 approval, not an on-chain challenge
+-- period. See batch.js for the honest framing.
+CREATE TABLE IF NOT EXISTS batch_channels (
+  id TEXT PRIMARY KEY,
+  chain_id INTEGER NOT NULL,
+  payer TEXT NOT NULL,
+  pay_to TEXT NOT NULL,
+  opened_at INTEGER NOT NULL,
+  valid_before INTEGER NOT NULL,
+  last_cumulative_value TEXT NOT NULL DEFAULT '0',
+  last_nonce TEXT,
+  vouchers_verified INTEGER NOT NULL DEFAULT 0,
+  claimed_value TEXT NOT NULL DEFAULT '0',
+  claimed_tx_hashes TEXT NOT NULL DEFAULT '[]',
+  closed INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_batch_channels_payer ON batch_channels(payer);
 `)
 
 // --- Migration: add chain_id to tables that predate multichain support ---

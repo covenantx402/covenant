@@ -18,6 +18,7 @@ const sessions = require('./sessions')
 const reputation = require('./reputation')
 const x402v2 = require('./x402-v2')
 const uptoDemo = require('./upto-demo')
+const batch = require('./batch')
 
 // marketplace slugs must never collide with COVENANT's own paid routes
 marketplace.setReservedSlugCheck((slug) => x402r.has(slug))
@@ -472,6 +473,60 @@ const server = http.createServer(async (req, res) => {
       payer: paid.from,
       payload: { text, wordCount: Math.min(n, uptoDemo.WORDS_CAP), actualChargeUsd: actualUsd, note: n > uptoDemo.WORDS_CAP ? `input truncated to the ${uptoDemo.WORDS_CAP}-word cap for pricing` : undefined },
     })
+    return
+  }
+
+  /* x402 "batch-settlement" scheme — a "running tab" channel. See batch.js
+     for the full honest framing (it's NOT a full payment-channel contract
+     with on-chain escrow/dispute timer; it's vouchers verified entirely
+     off-chain, accumulated into ONE on-chain claim). Three endpoints:
+       POST /x402/batch/open    — open a channel (payer, payTo, chainId)
+       POST /x402/batch/voucher — verify a signed cumulative voucher (free, no RPC)
+       POST /x402/batch/claim   — claim the net-new amount on-chain (one transferFrom)
+     Open by design (same as /x402/apis, /keys) — the economic gate is the
+     signature requirement on every voucher and the claim's own balance/
+     allowance/floor checks, not an auth wall on these endpoints. */
+  if (req.method === 'POST' && url === '/x402/batch/open') {
+    readBody(req, (err, payload) => {
+      if (err) { send(res, 400, { error: 'bad json' }); return }
+      const chainId = payload.chainId != null ? Number(payload.chainId) : facilitator.DEFAULT_CHAIN_ID
+      if (!facilitator.chains.isSupported(chainId)) { send(res, 400, { error: `unsupported chain: ${chainId}` }); return }
+      const payTo = facilitator.publicView(chainId).spender
+      if (!payTo) { send(res, 503, { error: `chain unavailable: settlement not configured for ${facilitator.chains.getChain(chainId).name}` }); return }
+      try {
+        const ch = batch.openChannel({ payer: payload.payer, payTo, chainId, validForSec: payload.validForSec })
+        send(res, 201, { ...ch, domain: batch.domainFor(chainId), types: batch.VOUCHER_TYPES })
+      } catch (e) { send(res, 400, { error: e.message || String(e) }) }
+    })
+    return
+  }
+
+  if (req.method === 'POST' && url === '/x402/batch/voucher') {
+    readBody(req, (err, payload) => {
+      if (err) { send(res, 400, { error: 'bad json' }); return }
+      const v = batch.verifyVoucher({ ethers, channelId: payload.channelId, cumulativeValue: payload.cumulativeValue, signature: payload.signature })
+      send(res, v.ok ? 200 : 400, v.ok ? v : { error: v.reason })
+    })
+    return
+  }
+
+  if (req.method === 'POST' && url === '/x402/batch/claim') {
+    readBody(req, async (err, payload) => {
+      if (err) { send(res, 400, { error: 'bad json' }); return }
+      const nc = batch.netClaimable(payload.channelId)
+      if (!nc.ok) { send(res, 400, { error: nc.reason }); return }
+      const result = await facilitator.claimChannel({ payer: nc.channel.payer, payTo: nc.channel.payTo, netValue: nc.netValue, chainId: nc.channel.chainId })
+      if (result.success) batch.recordClaim(payload.channelId, result.transaction, !!payload.close)
+      send(res, result.success ? 200 : 400, result.success ? { ...result, channelId: payload.channelId, totalClaimed: nc.totalValue } : { error: result.errorReason })
+    })
+    return
+  }
+
+  if (req.method === 'GET' && url.startsWith('/x402/batch/channel/')) {
+    const id = url.slice('/x402/batch/channel/'.length)
+    const ch = batch.getChannel(id)
+    if (!ch) { send(res, 404, { error: 'unknown channel' }); return }
+    send(res, 200, ch)
     return
   }
 

@@ -413,6 +413,62 @@ async function settle(intent, signature, splits = null, chainId = DEFAULT_CHAIN_
 }
 
 /**
+ * Claim an x402 "batch-settlement" channel on-chain: ONE transferFrom for
+ * the net-new cumulative value (see batch.js for channel/voucher
+ * mechanics — vouchers themselves are verified entirely off-chain, free,
+ * no RPC call; this is the ONLY on-chain step in the whole scheme, and it
+ * happens once per claim regardless of how many vouchers were verified).
+ * Reuses the exact same settlement-cost floor + gas pre-flight checks as
+ * settle() so a channel can't be claimed for less than it costs to claim.
+ * payer/payTo/netValue/chainId come from batch.netClaimable() — this
+ * function does not re-derive them, it just executes + records the tx.
+ * Returns { success, transaction?, errorReason? }.
+ */
+async function claimChannel({ payer, payTo, netValue, chainId }) {
+  const id = Number(chainId)
+  const c = chains.getChain(id)
+  const value = BigInt(netValue)
+  if (value <= 0n) return { success: false, errorReason: 'netValue must be > 0' }
+
+  const priceUsd = Number(ethers.formatUnits(value, c.decimals))
+  if (!chains.clearsSettleFloor(priceUsd, id)) {
+    return { success: false, errorReason: `claim amount too low to settle on ${c.name}: ${priceUsd} ${c.usdcSymbol} is below the ${c.minSettlePriceUsd} ${c.usdcSymbol} settlement-cost floor — accumulate more vouchers before claiming, or claim on a cheaper chain` }
+  }
+
+  const w = settlementWallet(id)
+  if (!w) return { success: false, errorReason: 'settlement wallet not configured' }
+
+  const token = new ethers.Contract(c.usdc, [
+    'function transferFrom(address from,address to,uint256 value) returns (bool)',
+    'function balanceOf(address) view returns (uint256)',
+    'function allowance(address,address) view returns (uint256)',
+  ], w)
+
+  try {
+    const [bal, allow, gas] = await Promise.all([
+      token.balanceOf(payer),
+      token.allowance(payer, w.address),
+      w.provider.getBalance(w.address),
+    ])
+    if (bal < value) return { success: false, errorReason: `payer ${c.usdcSymbol} balance too low to claim — wallet has ${ethers.formatUnits(bal, c.decimals)}, channel needs ${ethers.formatUnits(value, c.decimals)}` }
+    if (allow < value) return { success: false, errorReason: `${c.usdcSymbol} allowance too low to claim — payer must approve the facilitator for at least ${ethers.formatUnits(value, c.decimals)} ${c.usdcSymbol}` }
+    const gasNeeded = (await w.provider.getFeeData()).maxFeePerGas * 160000n
+    if (gas < gasNeeded) return { success: false, errorReason: `gateway settlement wallet on ${c.name} is low on gas — channel claim NOT taken, top up the facilitator wallet` }
+  } catch (_e) {
+    return { success: false, errorReason: `cannot read ${c.usdcSymbol} state from ${c.name} — RPC may be busy, retry in a moment` }
+  }
+
+  try {
+    const tx = await token.transferFrom(payer, payTo, value)
+    const receipt = await tx.wait()
+    return { success: true, transaction: receipt.hash, network: `eip155:${id}`, chainId: id, claimedValue: value.toString() }
+  } catch (e) {
+    const m = String(e.shortMessage || e.message || e)
+    return { success: false, errorReason: 'channel claim error: ' + m }
+  }
+}
+
+/**
  * Decode an X-PAYMENT header (base64 JSON of { intent, txHash, chainId })
  * and confirm the nonce was settled on-chain for this resource AND expected
  * chain. Headers minted before multichain have no chainId field — they
@@ -550,6 +606,7 @@ module.exports = {
   verify, settle, publicView, publicViewAll, chainReadiness, paymentRecordFor, claimReceipt, settleLogAll,
   isConfigured,
   finalizeSplits, cancelSplits, currentBlock, refundPayment, payout, claimNonce, releaseNonce,
+  claimChannel,
   domainFor, INTENT_TYPES,
   // back-compat single-chain exports (Robinhood 4663, the pre-multichain default)
   DOMAIN, USDG, CHAIN_ID, DOMAIN_NAME, DOMAIN_VERSION,
