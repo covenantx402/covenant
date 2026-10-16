@@ -166,6 +166,39 @@ Third-party marketplace listings (`/x402/marketplace/*`, not COVENANT's own
 routes) are the other place COVENANT keeps a cut: `COVENANT_MARKETPLACE_FEE_BPS`
 (default 500 = 5%) of each sale, split server-side after delivery.
 
+## Variable pricing: the `upto` scheme
+
+Every route above is flat-rate (x402's `exact` scheme: sign a fixed price,
+pull exactly that). `GET /x402/upto/echo` is the one route that genuinely
+needs variable pricing, and demonstrates x402's `upto` scheme: the buyer
+signs a **ceiling** once; the facilitator settles **up to** that ceiling —
+whatever the real per-request cost turns out to be, never more.
+
+**Honest framing:** this demo's real cost (price per word of `?text=`) is
+actually knowable *before* settling, from the query string — it doesn't
+strictly need "pull less than I expected" semantics the way a metered LLM
+call (true cost only known *after* the tokens are generated) or compute-time
+billing would. It proves the exact mechanism `upto` needs though: the
+challenge advertises a worst-case ceiling (0.0001 USDG/word × 500-word cap =
+0.05 USDG), the buyer signs that ceiling once via the same EIP-712
+`PaymentIntent` as every other route, and `POST /facilitator/settle` pulls
+only the real per-word cost (computed server-side from the text bound into
+the signed resource URL — never from a client-supplied amount, and clamped
+up to the chain's settlement-cost floor so a short text's literal price
+can't fall below what gas costs). A metered resource would compute that real
+cost *after* doing the work instead of from a query string, but the
+`facilitator.settle(intent, signature, splits, chainId, actualValue)` call
+shape — the fifth argument, `null` for every other route's "exact" behavior
+— is identical either way. `verify()` still checks the buyer actually
+holds/approves the full signed **ceiling**, not just the real charge, by
+design — "upto" authorizes the worst case once, not what any single
+settlement happens to pull.
+
+```bash
+curl https://gateway.covenantx402.com/x402/upto/echo?text=hello+world
+# 402 { accepts: [{ scheme: "upto", maxAmountRequired: "50000", ... }] } — the ceiling, not the real charge
+```
+
 ## Gateway endpoints
 
 **Discovery (free, no auth):**
