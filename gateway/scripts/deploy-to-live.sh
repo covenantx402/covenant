@@ -26,7 +26,8 @@ HEALTH_URL="http://127.0.0.1:8792/x402/health"
 # excluded — those are live state/secrets, never sourced from the repo.
 FILES=(server.js facilitator.js agent-vault.js x402-routes.js balance.js
        ratelimit.js db.js x402-v2.js sessions.js reputation.js wallets.js
-       keys.js marketplace.js data-providers.js article-extract.js)
+       keys.js marketplace.js data-providers.js article-extract.js
+       routes/discovery.js)
 
 echo "== COVENANT deploy: repo -> live =="
 
@@ -51,10 +52,15 @@ for f in "${FILES[@]}"; do
 done
 echo "   all files OK"
 
-# 3. Backup live state before touching anything.
+# 3. Backup live state before touching anything. mkdir -p per-file so
+#    subdirectory modules (e.g. routes/*.js) back up/restore correctly too,
+#    not just flat *.js at the gateway root.
 echo "-- backing up live state to $BACKUP_DIR --"
 mkdir -p "$BACKUP_DIR"
-cp -a "$LIVE_DIR"/*.js "$BACKUP_DIR/" 2>/dev/null
+for f in "${FILES[@]}"; do
+  mkdir -p "$BACKUP_DIR/$(dirname "$f")"
+  cp -a "$LIVE_DIR/$f" "$BACKUP_DIR/$f" 2>/dev/null
+done
 cp -a "$LIVE_DIR/data" "$BACKUP_DIR/data" 2>/dev/null
 cp -a "$LIVE_DIR/.env" "$BACKUP_DIR/.env" 2>/dev/null
 if [ ! -d "$BACKUP_DIR/data" ]; then
@@ -66,6 +72,7 @@ echo "   backup OK ($(du -sh "$BACKUP_DIR" | cut -f1))"
 # 4. Copy the code files (never data/, never .env).
 echo "-- copying files to $LIVE_DIR --"
 for f in "${FILES[@]}"; do
+  mkdir -p "$LIVE_DIR/$(dirname "$f")"
   cp "$REPO_GATEWAY/$f" "$LIVE_DIR/$f"
 done
 
@@ -76,7 +83,7 @@ sleep 3
 
 if ! systemctl is-active --quiet "$SERVICE"; then
   echo "DEPLOY FAILED: $SERVICE did not come up. Rolling back."
-  for f in "${FILES[@]}"; do cp "$BACKUP_DIR/$f" "$LIVE_DIR/$f" 2>/dev/null; done
+  for f in "${FILES[@]}"; do mkdir -p "$LIVE_DIR/$(dirname "$f")"; cp "$BACKUP_DIR/$f" "$LIVE_DIR/$f" 2>/dev/null; done
   systemctl restart "$SERVICE"
   echo "Rolled back to pre-deploy code. Investigate: journalctl -u $SERVICE -n 50"
   exit 1
@@ -89,7 +96,7 @@ HEALTH_OK=$(echo "$HEALTH" | node -e 'let d="";process.stdin.on("data",c=>d+=c).
 if [ "$HEALTH_OK" != "1" ]; then
   echo "DEPLOY FAILED: health check did not report ok. Rolling back."
   echo "   health response: $HEALTH"
-  for f in "${FILES[@]}"; do cp "$BACKUP_DIR/$f" "$LIVE_DIR/$f" 2>/dev/null; done
+  for f in "${FILES[@]}"; do mkdir -p "$LIVE_DIR/$(dirname "$f")"; cp "$BACKUP_DIR/$f" "$LIVE_DIR/$f" 2>/dev/null; done
   systemctl restart "$SERVICE"
   echo "Rolled back to pre-deploy code. Investigate: journalctl -u $SERVICE -n 50"
   exit 1
