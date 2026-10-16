@@ -62,7 +62,19 @@ const INTENT_TYPES = {
 // since the multichain migration — indexed lookups, no full-file rewrite.
 const stmts = {
   nonceGet: db.prepare('SELECT * FROM nonces WHERE chain_id = ? AND nonce = ?'),
-  nonceInsert: db.prepare('INSERT INTO nonces (chain_id, nonce, tx_hash, t, from_addr, value, redeemed) VALUES (?,?,?,?,?,?,0) ON CONFLICT(chain_id, nonce) DO NOTHING'),
+  // UPSERT, not DO NOTHING: settle() now writes a placeholder row via
+  // nonceClaim BEFORE the on-chain transferFrom (the race-condition fix
+  // — see settle()'s comment). This insert must overwrite that
+  // placeholder with the REAL settlement data on success, or the actual
+  // tx_hash/payer/value would silently never get recorded (DO NOTHING
+  // would make this a no-op against the already-existing placeholder
+  // row). The WHERE clause on the UPDATE half still guards against
+  // overwriting an already-real row (tx_hash IS NULL) — defensive only,
+  // since claimPaymentNonce's own exclusivity should prevent two
+  // genuine settlements ever reaching this insert for the same nonce.
+  nonceInsert: db.prepare(`INSERT INTO nonces (chain_id, nonce, tx_hash, t, from_addr, value, redeemed) VALUES (?,?,?,?,?,?,0)
+    ON CONFLICT(chain_id, nonce) DO UPDATE SET tx_hash = excluded.tx_hash, t = excluded.t, from_addr = excluded.from_addr, value = excluded.value
+    WHERE nonces.tx_hash IS NULL`),
   nonceClaim: db.prepare("INSERT INTO nonces (chain_id, nonce, tx_hash, t, from_addr, value, redeemed) VALUES (?,?,NULL,?,NULL,'0',0) ON CONFLICT(chain_id, nonce) DO NOTHING"),
   nonceRedeem: db.prepare('UPDATE nonces SET redeemed = 1 WHERE chain_id = ? AND nonce = ? AND redeemed = 0'),
   nonceDelete: db.prepare('DELETE FROM nonces WHERE chain_id = ? AND nonce = ?'),
@@ -98,6 +110,34 @@ function rowToSettleRecord(r) {
 }
 
 function usedNoncesHas(chainId, nonce) { return !!stmts.nonceGet.get(Number(chainId), nonce) }
+
+/**
+ * Atomically claim a PAYMENT nonce slot before any on-chain work in
+ * settle() — see settle()'s own comment for the race this closes.
+ * stmts.nonceClaim writes a placeholder row (tx_hash NULL, value '0')
+ * via INSERT ... ON CONFLICT DO NOTHING; a true SQLite write is
+ * serialized per-connection, so this is a real exclusivity guarantee,
+ * not just an app-level check-then-act. On success, settle()'s own
+ * stmts.nonceInsert is an UPSERT that overwrites this placeholder with
+ * the real settlement data (tx_hash, payer, value) — it has to be an
+ * UPSERT, not DO NOTHING, specifically because the placeholder row
+ * already exists by the time it runs. On any failure,
+ * releasePaymentNonce DELETEs the placeholder so the nonce is claimable
+ * again (legitimate retries after a transient RPC/gas failure aren't
+ * permanently locked out).
+ */
+function claimPaymentNonce(chainId, nonce) {
+  const info = stmts.nonceClaim.run(Number(chainId), nonce, Date.now())
+  return info.changes > 0
+}
+function releasePaymentNonce(chainId, nonce) {
+  // Only delete if it's still the unsettled placeholder (tx_hash IS
+  // NULL) — never delete a real, already-recorded settlement row. This
+  // matters if releasePaymentNonce is ever called on a nonce that (by
+  // some other path) already has a real settlement recorded; it must
+  // not erase that record.
+  db.prepare('DELETE FROM nonces WHERE chain_id = ? AND nonce = ? AND tx_hash IS NULL').run(Number(chainId), nonce)
+}
 
 // provider()/settlementWallet() are memoized PER CHAIN — verify()/settle()/
 // publicView()/refundPayment()/payout()/finalizeSplits()/currentBlock() each
@@ -333,8 +373,29 @@ async function settle(intent, signature, splits = null, chainId = DEFAULT_CHAIN_
   const v = await verify(intent, signature, id)
   if (!v.ok) return { success: false, errorReason: v.reason, payer: v.payer || null }
 
+  // Atomic nonce claim — found by audit (same class of bug fixed in
+  // batch.js's claim lock): verify()'s usedNoncesHas() check and the
+  // ACTUAL nonce-recording insert (nonceInsert, below after a successful
+  // on-chain transferFrom) are separated by the entire RPC round-trip +
+  // transferFrom + tx.wait() — a long window. Two concurrent settle()
+  // calls for the IDENTICAL signed intent both pass verify()'s check,
+  // both reach transferFrom, and (if the buyer's allowance covers it
+  // twice) both succeed — spending the same single signature twice.
+  // Confirmed with a live PoC: two concurrent settle() calls for one
+  // intent both reached the identical balance-check failure point,
+  // proving neither was rejected for nonce reuse before the on-chain
+  // attempt. stmts.nonceClaim is an atomic INSERT ... ON CONFLICT DO
+  // NOTHING (SQLite's writes are serialized per-connection, so this is
+  // a real exclusivity guarantee, not just app-level) — claim the nonce
+  // HERE, before any chain call, and release it on any failure so a
+  // legitimately-retried settlement (RPC hiccup, insufficient gas that
+  // gets topped up, etc.) isn't permanently locked out.
+  if (!claimPaymentNonce(id, intent.nonce)) {
+    return { success: false, errorReason: 'nonce already claimed by a concurrent or prior settlement attempt', payer: intent.from }
+  }
+
   const w = settlementWallet(id)
-  if (!w) return { success: false, errorReason: 'settlement wallet not configured' }
+  if (!w) { releasePaymentNonce(id, intent.nonce); return { success: false, errorReason: 'settlement wallet not configured' } }
 
   const token = new ethers.Contract(c.usdc, [
     'function transferFrom(address from,address to,uint256 value) returns (bool)',
@@ -355,13 +416,14 @@ async function settle(intent, signature, splits = null, chainId = DEFAULT_CHAIN_
       token.allowance(intent.from, w.address),
       w.provider.getBalance(w.address),
     ])
-    if (bal < settleValue) return { success: false, errorReason: `payer ${c.usdcSymbol} balance too low — wallet has ${ethers.formatUnits(bal, c.decimals)}, needs ${ethers.formatUnits(settleValue, c.decimals)}`, payer: intent.from }
-    if (allow < settleValue) return { success: false, errorReason: `${c.usdcSymbol} allowance too low — approve the facilitator for at least ${ethers.formatUnits(settleValue, c.decimals)} ${c.usdcSymbol}, then retry`, payer: intent.from }
+    if (bal < settleValue) { releasePaymentNonce(id, intent.nonce); return { success: false, errorReason: `payer ${c.usdcSymbol} balance too low — wallet has ${ethers.formatUnits(bal, c.decimals)}, needs ${ethers.formatUnits(settleValue, c.decimals)}`, payer: intent.from } }
+    if (allow < settleValue) { releasePaymentNonce(id, intent.nonce); return { success: false, errorReason: `${c.usdcSymbol} allowance too low — approve the facilitator for at least ${ethers.formatUnits(settleValue, c.decimals)} ${c.usdcSymbol}, then retry`, payer: intent.from } }
     // facilitator pays the gas — fail LOUD with a clear reason instead of a
     // confusing 'insufficient funds for intrinsic transaction cost' from ethers
     const gasNeeded = (await w.provider.getFeeData()).maxFeePerGas * 160000n
-    if (gas < gasNeeded) return { success: false, errorReason: `gateway settlement wallet on ${c.name} is low on gas (${ethers.formatEther(gas)}, needs ~${ethers.formatEther(gasNeeded)}) — payment NOT taken, top up the facilitator wallet`, payer: intent.from }
+    if (gas < gasNeeded) { releasePaymentNonce(id, intent.nonce); return { success: false, errorReason: `gateway settlement wallet on ${c.name} is low on gas (${ethers.formatEther(gas)}, needs ~${ethers.formatEther(gasNeeded)}) — payment NOT taken, top up the facilitator wallet`, payer: intent.from } }
   } catch (_e) {
+    releasePaymentNonce(id, intent.nonce)
     return { success: false, errorReason: `cannot read ${c.usdcSymbol} state from ${c.name} — RPC may be busy, retry in a moment`, payer: intent.from }
   }
 
@@ -404,6 +466,16 @@ async function settle(intent, signature, splits = null, chainId = DEFAULT_CHAIN_
     const paymentReceipt = Buffer.from(JSON.stringify({ x402Version: 1, intent, txHash: rec.txHash, chainId: id })).toString('base64')
     return { success: true, payer: intent.from, transaction: receipt.hash, network: `eip155:${id}`, chainId: id, payment: paymentReceipt, settledValue: String(settleValue) }
   } catch (e) {
+    // The claim is released on ANY failure here, including a tx that was
+    // actually broadcast but reverted on-chain (no funds moved) — safe to
+    // retry. The one case NOT covered (and not newly introduced by this
+    // fix — pre-existing either way): a crash between a successful
+    // tx.wait() and the nonceInsert/settleInsert writes below would lose
+    // the record of an already-executed transfer. That's an application-
+    // crash-during-a-10ms-window edge case, not something a retry lock
+    // can fix without on-chain idempotency (EIP-3009-style), and it's the
+    // same exposure every settlement here already had before this patch.
+    releasePaymentNonce(id, intent.nonce)
     const m = String(e.shortMessage || e.message || e)
     if (/missing revert data|CALL_EXCEPTION/i.test(m)) {
       return { success: false, errorReason: 'on-chain transfer was rejected by the chain (balance/allowance changed mid-payment) — retry the payment', payer: intent.from }
@@ -607,6 +679,7 @@ module.exports = {
   isConfigured,
   finalizeSplits, cancelSplits, currentBlock, refundPayment, payout, claimNonce, releaseNonce,
   claimChannel,
+  claimPaymentNonce, releasePaymentNonce, // exported for the dedicated race-condition regression unit test
   domainFor, INTENT_TYPES,
   // back-compat single-chain exports (Robinhood 4663, the pre-multichain default)
   DOMAIN, USDG, CHAIN_ID, DOMAIN_NAME, DOMAIN_VERSION,
