@@ -170,6 +170,22 @@ function registerDiscoveryRoutes({
         '/x402/marketplace': { get: { operationId: 'list_marketplace', summary: 'Third-party marketplace listings (free)', security: [], responses: { '200': { description: 'JSON catalog' } } } },
         '/facilitator': { get: { operationId: 'facilitator_status', summary: 'Settlement config (free)', security: [], responses: { '200': { description: 'JSON status' } } } },
         '/supported': { get: { operationId: 'supported_kinds', summary: 'x402 spec-standard facilitator capability discovery: (x402Version, scheme, network) kinds + signer addresses (free). Also at /facilitator/supported.', security: [], responses: { '200': { description: '{ x402Version, kinds[], extensions[], signers{} }' } } } },
+        '/x402/upto/echo': {
+          get: {
+            operationId: 'upto_echo', summary: 'x402 "upto" scheme demo: word-count echo with a genuinely variable price (every other paid route here is flat-rate "exact")',
+            description: 'Challenge advertises a worst-case CEILING (500 words); settlement only ever pulls the real per-word cost, computed server-side from ?text=, never from a client-supplied amount. See README "Variable pricing" section for the honest framing of what this demo does and doesn\'t prove.',
+            parameters: [
+              { name: 'text', in: 'query', required: false, schema: { type: 'string' }, description: 'Text to echo back with its word count. Bound into the signed resource URL — a receipt for one text cannot be replayed against a different one.' },
+              { name: 'X-PAYMENT', in: 'header', required: false, description: 'Base64 x402 receipt from POST /facilitator/settle. Omit → HTTP 402 challenge.', schema: { type: 'string' } },
+            ],
+            'x-payment-info': { price: { mode: 'variable', currency: 'USD', amount: '0.0001 per word, capped at 500 words (0.05 ceiling)' }, protocols: [{ x402: { network: 'eip155:4663', scheme: 'upto' } }] },
+            security: [{ x402: [] }],
+            responses: {
+              '200': { description: 'Delivered payload: { text, wordCount, actualChargeUsd }' },
+              '402': { description: 'Payment Required — accepts[0].scheme is "upto", maxAmountRequired is the worst-case ceiling.' }
+            }
+          }
+        },
         '/health': { get: { operationId: 'health', summary: 'Health check (free)', security: [], responses: { '200': { description: 'ok' } } } },
         '/metrics': { get: { operationId: 'metrics', summary: 'Prometheus text-exposition metrics (free)', security: [], responses: { '200': { description: 'text/plain; version=0.0.4' } } } },
         '/session/redeem': {
@@ -246,6 +262,16 @@ function registerDiscoveryRoutes({
         network,
         asset: c.usdc,
         extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION, calls: 100, ttlSec: 3600 },
+      })
+      // "upto" is live today only on /x402/upto/echo (see upto-demo.js),
+      // which is chain-agnostic — advertise it for every chain here too,
+      // not just Robinhood, since the route itself accepts ?chain=<id>.
+      kinds.push({
+        x402Version: 1,
+        scheme: 'upto',
+        network,
+        asset: c.usdc,
+        extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION },
       })
       if (view.spender) signers[network] = [view.spender]
     }

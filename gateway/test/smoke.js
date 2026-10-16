@@ -209,6 +209,48 @@ async function main() {
     assert.strictEqual(supAlias.status, 200)
     assert.deepStrictEqual(supAlias.json.kinds, sup.json.kinds); ok('GET /facilitator/supported alias matches /supported exactly')
 
+    // "upto" scheme demo (/x402/upto/echo) — full E2E including the
+    // security property that matters most: a receipt signed for one text
+    // cannot be replayed against a different (more expensive) text,
+    // because text is bound into the EIP-712-signed resource URL.
+    const uptoUnpaid = await req('GET', '/x402/upto/echo?text=hello%20world')
+    assert.strictEqual(uptoUnpaid.status, 402)
+    assert.strictEqual(uptoUnpaid.json.accepts[0].scheme, 'upto')
+    assert.strictEqual(uptoUnpaid.json.accepts[0].resource, 'https://gateway.covenantx402.com/x402/upto/echo?text=hello+world', 'resource binds the exact query text, using the gateway\'s PUBLIC_ORIGIN (fixed to the production domain regardless of what port this test server happens to listen on)')
+    const uptoCeiling = BigInt(uptoUnpaid.json.accepts[0].maxAmountRequired)
+    assert.strictEqual(uptoCeiling.toString(), '50000', 'ceiling = PRICE_PER_WORD_USD(0.0001) * WORDS_CAP(500) = 0.05 USDG = 50000 atomic'); ok('GET /x402/upto/echo (unpaid) challenges with scheme "upto" and the worst-case ceiling')
+
+    const uptoWallet = ethers.Wallet.createRandom()
+    const uptoIntent = {
+      from: uptoWallet.address, to: uptoUnpaid.json.accepts[0].payTo,
+      value: uptoCeiling.toString(),
+      validAfter: String(now - 10), validBefore: String(now + 300),
+      nonce: ethers.hexlify(ethers.randomBytes(32)), resource: uptoUnpaid.json.accepts[0].resource,
+    }
+    const uptoSig = await uptoWallet.signTypedData(domain, types, uptoIntent)
+    // No balance on this fresh wallet. verify() checks balance/allowance
+    // against the FULL SIGNED CEILING (not the real per-request charge)
+    // by design — the buyer must actually hold/approve the worst case
+    // they authorized, even though any single settle call only pulls
+    // part of it. So the balance-shortfall error here correctly names
+    // the ceiling (0.05), not the real per-word charge — proving verify()
+    // still gates on the ceiling under "upto", same as "exact". The
+    // actualValue mechanics themselves (settle() only ever pulling LESS
+    // than the ceiling) are covered directly in
+    // test/unit/facilitator-upto.test.js, which can call settle() past
+    // this balance gate by using a signature that fails differently.
+    const uptoSettle = await req('POST', '/facilitator/settle', { intent: uptoIntent, signature: uptoSig, chainId: 4663 })
+    assert.strictEqual(uptoSettle.json.success, false)
+    assert.ok(/insufficient USDG balance.*0\.05/.test(uptoSettle.json.errorReason), `expected a balance-shortfall error naming the 0.05 ceiling (verify() gates on the full ceiling, by design) — got: ${uptoSettle.json.errorReason}`); ok('upto settlement still gates balance/allowance against the full signed ceiling, not the real per-request charge')
+
+    // Replay-against-different-text attack: tamper the resource's bound
+    // text after signing — must fail signature verification, not silently
+    // charge a different (possibly higher) amount for different text.
+    const tamperedIntent = { ...uptoIntent, resource: uptoIntent.resource.replace('hello+world', 'a+much+longer+piece+of+text+entirely') }
+    const tamperSettle = await req('POST', '/facilitator/settle', { intent: tamperedIntent, signature: uptoSig, chainId: 4663 })
+    assert.strictEqual(tamperSettle.json.success, false)
+    assert.ok(/signature does not match/.test(tamperSettle.json.errorReason), `tampering the bound text after signing must fail signature verification, got: ${tamperSettle.json.errorReason}`); ok('tampering the signed resource\'s bound text after signing is rejected (signature mismatch)')
+
     console.log(`\nSMOKE PASS — ${pass} checks`)
   } finally {
     server.kill()

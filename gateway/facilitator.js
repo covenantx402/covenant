@@ -273,16 +273,39 @@ async function verify(intent, signature, chainId = DEFAULT_CHAIN_ID) {
 }
 
 /**
- * Execute on-chain settlement: transferFrom(payer, payTo, value) on the
- * intent's target chain. Optional `splits`: after the pull, the facilitator
- * wallet pushes each { to, value } leg (marketplace fee split). Legs are
- * best-effort — a failed leg never voids the buyer's payment; it is logged
- * and retried manually.
+ * Execute on-chain settlement: transferFrom(payer, payTo, settleValue) on
+ * the intent's target chain. settleValue defaults to intent.value (the
+ * "exact" scheme's fixed-price behavior, unchanged) but can be lower via
+ * actualValue — that's the "upto" scheme: the signed intent.value is a
+ * CEILING the buyer authorized, not the amount that necessarily gets
+ * pulled. COVENANT's approve+transferFrom pattern supports this natively
+ * (unlike EIP-3009's transferWithAuthorization, which locks an exact
+ * amount into the signature itself) — transferFrom can pull any amount up
+ * to the live allowance, so "settle less than the signed ceiling" needs
+ * zero new on-chain mechanism, just a actualValue <= intent.value check
+ * here plus a resource-specific way for the caller to know the real cost
+ * (e.g. token-metered LLM calls, compute-time billing).
+ * Optional `splits`: after the pull, the facilitator wallet pushes each
+ * { to, value } leg (marketplace fee split). Legs are best-effort — a
+ * failed leg never voids the buyer's payment; it is logged and retried
+ * manually.
  * Returns { success, transaction?, errorReason?, payer? }.
  */
-async function settle(intent, signature, splits = null, chainId = DEFAULT_CHAIN_ID) {
+async function settle(intent, signature, splits = null, chainId = DEFAULT_CHAIN_ID, actualValue = null) {
   const id = Number(chainId)
   const c = chains.getChain(id)
+
+  const ceilingValue = BigInt(intent?.value || 0)
+  // actualValue selects the "upto" scheme: settle LESS than the signed
+  // ceiling. null/undefined means "exact" — settle the full signed value,
+  // today's unchanged default behavior.
+  let settleValue = ceilingValue
+  if (actualValue != null) {
+    const av = BigInt(actualValue)
+    if (av <= 0n) return { success: false, errorReason: 'actualValue must be > 0', payer: intent?.from || null }
+    if (av > ceilingValue) return { success: false, errorReason: `actualValue (${av}) exceeds the signed ceiling (${ceilingValue}) — cannot settle more than the buyer authorized`, payer: intent?.from || null }
+    settleValue = av
+  }
 
   // Settlement-cost floor: USDC/USDG are ~$1-pegged, so the formatted
   // decimal amount IS the USD price — no oracle needed. A price below the
@@ -293,10 +316,12 @@ async function settle(intent, signature, splits = null, chainId = DEFAULT_CHAIN_
   // on what COVENANT will settle, not a separate line-item fee — the
   // full signed amount still goes to payTo; it just can't be priced
   // below the chain's own settlement cost. See chains.js for the
-  // per-chain floor values and how they were measured. Deliberately
-  // checked against intent.value directly (not v.ok's resolved payer)
-  // so a bad price is rejected even before signature/balance checks run.
-  const priceUsd = Number(ethers.formatUnits(BigInt(intent?.value || 0), c.decimals))
+  // per-chain floor values and how they were measured. Checked against
+  // settleValue (what's ACTUALLY charged), not the signed ceiling — an
+  // "upto" intent with a generous ceiling but a tiny real usage should
+  // still be floor-rejected on the real amount, not waved through
+  // because the ceiling looked big enough.
+  const priceUsd = Number(ethers.formatUnits(settleValue, c.decimals))
   if (!chains.clearsSettleFloor(priceUsd, id)) {
     return {
       success: false,
@@ -319,14 +344,19 @@ async function settle(intent, signature, splits = null, chainId = DEFAULT_CHAIN_
   ], w)
 
   // pre-flight on-chain state — biar error-nya jelas, bukan 'missing revert data'
+  // Checked against the SIGNED CEILING (intent.value), not settleValue: the
+  // buyer's wallet must actually hold/approve the full ceiling they
+  // signed, even if this particular settlement only pulls part of it —
+  // that's the whole point of "upto" (the ceiling is what they committed
+  // to being able to pay, not what any single settle call takes).
   try {
     const [bal, allow, gas] = await Promise.all([
       token.balanceOf(intent.from),
       token.allowance(intent.from, w.address),
       w.provider.getBalance(w.address),
     ])
-    if (bal < intent.value) return { success: false, errorReason: `payer ${c.usdcSymbol} balance too low — wallet has ${ethers.formatUnits(bal, c.decimals)}, needs ${ethers.formatUnits(intent.value, c.decimals)}`, payer: intent.from }
-    if (allow < intent.value) return { success: false, errorReason: `${c.usdcSymbol} allowance too low — approve the facilitator for at least ${ethers.formatUnits(intent.value, c.decimals)} ${c.usdcSymbol}, then retry`, payer: intent.from }
+    if (bal < settleValue) return { success: false, errorReason: `payer ${c.usdcSymbol} balance too low — wallet has ${ethers.formatUnits(bal, c.decimals)}, needs ${ethers.formatUnits(settleValue, c.decimals)}`, payer: intent.from }
+    if (allow < settleValue) return { success: false, errorReason: `${c.usdcSymbol} allowance too low — approve the facilitator for at least ${ethers.formatUnits(settleValue, c.decimals)} ${c.usdcSymbol}, then retry`, payer: intent.from }
     // facilitator pays the gas — fail LOUD with a clear reason instead of a
     // confusing 'insufficient funds for intrinsic transaction cost' from ethers
     const gasNeeded = (await w.provider.getFeeData()).maxFeePerGas * 160000n
@@ -336,15 +366,15 @@ async function settle(intent, signature, splits = null, chainId = DEFAULT_CHAIN_
   }
 
   try {
-    const tx = await token.transferFrom(intent.from, intent.to, intent.value)
+    const tx = await token.transferFrom(intent.from, intent.to, settleValue)
     const receipt = await tx.wait()
     const rec = {
       chainId: id,
       t: Date.now(),
       payer: intent.from,
       to: intent.to,
-      value: String(intent.value),
-      valueFormatted: ethers.formatUnits(intent.value, c.decimals),
+      value: String(settleValue),
+      valueFormatted: ethers.formatUnits(settleValue, c.decimals),
       resource: intent.resource || '',
       txHash: receipt.hash,
       gasUsed: receipt.gasUsed?.toString?.() || null,
@@ -357,19 +387,22 @@ async function settle(intent, signature, splits = null, chainId = DEFAULT_CHAIN_
     // the gateway confirms the buyer actually received the seller's payload
     // (finalizeSplits after delivery). That way a failed upstream can be
     // refunded in full without clawing back from the seller. Best-effort.
+    // Split totals are checked against settleValue (what was ACTUALLY
+    // pulled), not the signed ceiling — a split sized for the ceiling would
+    // overdraw a settlement that pulled less under "upto".
     if (Array.isArray(splits) && splits.length) {
       const total = splits.reduce((s, x) => s + BigInt(x.value), 0n)
-      if (total <= BigInt(intent.value)) {
+      if (total <= settleValue) {
         rec.pendingSplits = splits.map(s => ({ to: s.to, value: String(s.value) }))
         stmts.settleSetSplits.run(JSON.stringify(rec.pendingSplits), id, rec.txHash)
       } else {
-        console.error('settle: split total exceeds payment — skipping legs', String(total), '>', String(intent.value))
+        console.error('settle: split total exceeds payment — skipping legs', String(total), '>', String(settleValue))
       }
     }
 
     // payment receipt the client replays as X-PAYMENT to unlock the resource
     const paymentReceipt = Buffer.from(JSON.stringify({ x402Version: 1, intent, txHash: rec.txHash, chainId: id })).toString('base64')
-    return { success: true, payer: intent.from, transaction: receipt.hash, network: `eip155:${id}`, chainId: id, payment: paymentReceipt }
+    return { success: true, payer: intent.from, transaction: receipt.hash, network: `eip155:${id}`, chainId: id, payment: paymentReceipt, settledValue: String(settleValue) }
   } catch (e) {
     const m = String(e.shortMessage || e.message || e)
     if (/missing revert data|CALL_EXCEPTION/i.test(m)) {

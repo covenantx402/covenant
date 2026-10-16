@@ -17,6 +17,7 @@ const ratelimit = require('./ratelimit')
 const sessions = require('./sessions')
 const reputation = require('./reputation')
 const x402v2 = require('./x402-v2')
+const uptoDemo = require('./upto-demo')
 
 // marketplace slugs must never collide with COVENANT's own paid routes
 marketplace.setReservedSlugCheck((slug) => x402r.has(slug))
@@ -199,6 +200,26 @@ function validateQuotedIntent(intent, chainId) {
       if (plan && (!mkt || !mkt.plan)) return 'this API has no subscription plan'
       expectedResource = base + '/x402/api/' + slug + (plan ? '?plan=1' : '') + (chainId === facilitator.DEFAULT_CHAIN_ID ? '' : `${plan ? '&' : '?'}chain=${chainId}`)
       expectedValue = plan ? String(mkt.plan.atomic) : x402r.priceToAtomic((mkt || rec).price, chainId)
+    } else if (u.pathname === '/x402/upto/echo') {
+      // "upto" scheme: the signed intent.value must equal the advertised
+      // CEILING exactly (same floor-clamped ceiling the 402 handler
+      // quoted) — the buyer authorizes the worst case once; the actual
+      // per-request charge is computed server-side in /facilitator/settle
+      // via actualValue, always <= this ceiling, never equal to the real
+      // usage at the signature level (that's the whole point of upto).
+      // `text` is bound into the resource URL (like `chain` is) so the
+      // settled receipt can only unlock a reply for THIS exact text —
+      // without that binding, a buyer could settle against a short/cheap
+      // text then replay the receipt against a longer ?text= value on
+      // the actual GET and get extra words delivered for free.
+      if ([...u.searchParams.keys()].some(k => k !== 'chain' && k !== 'text')) return 'intent.resource has unsupported query parameters'
+      const boundText = u.searchParams.get('text') || ''
+      const qs = new URLSearchParams()
+      qs.set('text', boundText)
+      if (chainId !== facilitator.DEFAULT_CHAIN_ID) qs.set('chain', String(chainId))
+      expectedResource = base + '/x402/upto/echo?' + qs.toString()
+      const uptoCeilingUsd = Math.max(uptoDemo.ceilingPriceUsd(), c.minSettlePriceUsd)
+      expectedValue = uptoDemo.toAtomic(uptoCeilingUsd, chainId)
     } else return 'intent.resource is not a paid gateway endpoint'
   }
   const actualResource = String(intent.resource).replace('https://covenant.re', base)
@@ -377,6 +398,79 @@ const server = http.createServer(async (req, res) => {
         const rec = x402r.create(payload || {})
         send(res, 201, rec)
       } catch (e) { send(res, 400, { error: e.message || String(e) }) }
+    })
+    return
+  }
+
+  /* x402 "upto" scheme demo — the one resource on this gateway with a
+     genuinely variable price (every other paid route is flat-rate
+     "exact"). See upto-demo.js for the honest framing of what this does
+     and doesn't prove. Standalone route (not routed through the generic
+     /x402/api/:slug registry/marketplace dispatcher, which assumes a
+     fixed per-route price end to end) so the exact/upto code paths stay
+     separable instead of threading a scheme branch through that whole
+     flow for a single demo endpoint.
+     GET ?text=... — the 402 challenge always advertises the WORST-CASE
+     ceiling (upto-demo's WORDS_CAP words); settlement only ever pulls the
+     real per-request cost, computed server-side from the actual text,
+     never from a buyer-supplied amount. */
+  if ((req.method === 'GET' || req.method === 'POST') && url.startsWith('/x402/upto/echo')) {
+    const reqUrl = new URL(req.url, PUBLIC_ORIGIN)
+    const chainParam = reqUrl.searchParams.get('chain')
+    let chainId = facilitator.DEFAULT_CHAIN_ID
+    if (chainParam) {
+      if (!facilitator.chains.isSupported(chainParam)) { send(res, 400, { error: `unsupported chain: ${chainParam}`, supported: facilitator.chains.listChains().map(c => c.id) }); return }
+      chainId = Number(chainParam)
+    }
+    if (!facilitator.isConfigured(chainId)) { send(res, 503, { error: `chain unavailable: settlement RPC is not configured for ${facilitator.chains.getChain(chainId).name}` }); return }
+    const chain = facilitator.chains.getChain(chainId)
+    const text = reqUrl.searchParams.get('text') || ''
+    // Resource URL binds `text` the same way validateQuotedIntent expects
+    // it (text always present, chain only when non-default) — the settled
+    // receipt can only unlock a reply for THIS exact text.
+    const resQs = new URLSearchParams()
+    resQs.set('text', text)
+    if (chainParam) resQs.set('chain', String(chainId))
+    const resource = PUBLIC_ORIGIN + '/x402/upto/echo?' + resQs.toString()
+
+    const paid = paidFor(req.headers['x-payment'], resource, chainId)
+    if (!paid) {
+      const payTo = facilitator.publicView(chainId).spender || process.env.COVENANT_X402_PAYTO || '0x0000000000000000000000000000000000000000'
+      // Ceiling: sized for the worst case (WORDS_CAP words), floor-clamped
+      // per chain the same way /x402/premium's sample price is — a
+      // ceiling below the chain's own settlement-cost floor would be
+      // unsettleable even in the best case.
+      const ceilingUsd = Math.max(uptoDemo.ceilingPriceUsd(), chain.minSettlePriceUsd)
+      const ceilingAtomic = uptoDemo.toAtomic(ceilingUsd, chainId)
+      send402(res, {
+        x402Version: 1,
+        error: 'PAYMENT_REQUIRED',
+        accepts: [{
+          scheme: 'upto',
+          network: `eip155:${chainId}`,
+          maxAmountRequired: ceilingAtomic,
+          resource,
+          description: `COVENANT upto-scheme demo: word-count echo, up to ${uptoDemo.WORDS_CAP} words. Ceiling ${ceilingUsd} ${chain.usdcSymbol} on ${chain.name} — actual charge is per-word, computed server-side, settled by POST /facilitator/settle with the real usage (never more than this ceiling).`,
+          mimeType: 'application/json',
+          payTo,
+          maxTimeoutSeconds: 60,
+          asset: chain.usdc,
+          extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION, chainId, spender: payTo, pricePerWordUsd: uptoDemo.PRICE_PER_WORD_USD, wordsCap: uptoDemo.WORDS_CAP },
+        }],
+      })
+      return
+    }
+
+    if (!facilitator.claimReceipt(paid.nonce, paid.chainId)) { send(res, 409, { error: 'receipt already redeemed' }); return }
+    const n = uptoDemo.wordCount(text)
+    const actualUsd = uptoDemo.actualPriceUsd(text)
+    send(res, 200, {
+      ok: true,
+      api: 'upto-echo',
+      scheme: 'upto',
+      tx: paid.txHash,
+      payer: paid.from,
+      payload: { text, wordCount: Math.min(n, uptoDemo.WORDS_CAP), actualChargeUsd: actualUsd, note: n > uptoDemo.WORDS_CAP ? `input truncated to the ${uptoDemo.WORDS_CAP}-word cap for pricing` : undefined },
     })
     return
   }
@@ -651,7 +745,29 @@ const server = http.createServer(async (req, res) => {
         send(res, 400, { error: 'intent resource chain does not match payload.chainId — request a fresh 402 challenge for the selected chain' })
         return
       }
-      facilitator.settle(payload.intent, payload.signature, serverSplitsFor(payload.intent, chainId), chainId).then(v => {
+      // "upto" scheme: compute the real charge server-side from the text
+      // bound into intent.resource (validateQuotedIntent already confirmed
+      // the resource is well-formed and matches the signed ceiling) —
+      // NEVER from a client-supplied amount. null (the default) means
+      // "exact": settle() charges the full signed value, unchanged.
+      let actualValue = null
+      try {
+        const ru = new URL(String(payload.intent?.resource || ''), PUBLIC_ORIGIN)
+        if (ru.pathname === '/x402/upto/echo') {
+          const boundText = ru.searchParams.get('text') || ''
+          const c = facilitator.chains.getChain(chainId)
+          // Clamp the real per-word cost up to this chain's settlement
+          // floor, same policy as every other route: never settle below
+          // what gas costs. A short text's literal word-count price could
+          // otherwise land under Ethereum's $0.05 floor and get rejected
+          // by settle()'s own floor check — charging the floor instead of
+          // rejecting outright keeps "pay less than the ceiling" working
+          // for short inputs instead of failing them.
+          const actualUsd = Math.max(uptoDemo.actualPriceUsd(boundText), c.minSettlePriceUsd)
+          actualValue = uptoDemo.toAtomic(actualUsd, chainId)
+        }
+      } catch { /* not a URL resource (e.g. "session") — exact scheme, actualValue stays null */ }
+      facilitator.settle(payload.intent, payload.signature, serverSplitsFor(payload.intent, chainId), chainId, actualValue).then(v => {
         vault.audit(v.success ? 'settle-ok' : 'settle-fail', v.payer || null, { tx: v.transaction || v.errorReason, chainId })
         let out = v
         if (v.success) {

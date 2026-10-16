@@ -27,6 +27,7 @@ module.exports = [
         clearInterval: 'readonly',
         fetch: 'readonly',
         URL: 'readonly',
+        URLSearchParams: 'readonly',
         AbortSignal: 'readonly',
         Promise: 'readonly',
       },
