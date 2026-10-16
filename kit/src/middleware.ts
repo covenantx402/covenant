@@ -7,7 +7,6 @@ import {
   USDC_ADDRESSES,
   ASSET_META,
   type ExactEvmAuthorization,
-  type Network,
   type PaymentPayload,
   type PaymentRequirements,
   type PaymentRequiredResponse,

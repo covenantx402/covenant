@@ -21,6 +21,7 @@ jobs:
           cache: npm
           cache-dependency-path: gateway/package-lock.json
       - run: npm ci
+      - run: npm run lint
       - run: npm test
 
   kit:
@@ -37,6 +38,7 @@ jobs:
           cache: npm
           cache-dependency-path: kit/package-lock.json
       - run: npm ci
+      - run: npm run lint
       - run: npm run build
 
   docker:
