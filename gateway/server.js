@@ -797,7 +797,7 @@ const server = http.createServer(async (req, res) => {
   // ---- public leaderboard: real settlement history, grouped by payer
   if (req.url === '/x402/leaderboard') {
     const log = facilitator.settleLogAll()
-    const routeOf = (r) => { try { const pn = new URL(r).pathname; return pn.includes('/api/') ? '/api' + pn.slice(pn.indexOf('/api/') + 4) : pn } catch (e) { return 'general' } }
+    const routeOf = (r) => { try { const pn = new URL(r).pathname; return pn.includes('/api/') ? '/api' + pn.slice(pn.indexOf('/api/') + 4) : pn } catch (_e) { return 'general' } }
     const byPayer = new Map()
     const byRoute = new Map()
     for (const e of log) {
@@ -1057,7 +1057,7 @@ const server = http.createServer(async (req, res) => {
   // ---- billing history: real on-chain settlements from the settle log.
   if (req.url === '/x402/billing') {
     const log = facilitator.settleLogAll()
-    const routeOf = (r) => { try { const pn = new URL(r).pathname; return pn.includes('/api/') ? '/api' + pn.slice(pn.indexOf('/api/') + 4) : pn } catch (e) { return 'general' } }
+    const routeOf = (r) => { try { const pn = new URL(r).pathname; return pn.includes('/api/') ? '/api' + pn.slice(pn.indexOf('/api/') + 4) : pn } catch (_e) { return 'general' } }
     const rows = log.map(e => ({
       t: e.t,
       api: e.resource ? routeOf(e.resource) : 'general',

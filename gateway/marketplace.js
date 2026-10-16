@@ -137,7 +137,10 @@ const REVOKE_TYPES = {
 }
 // Tahap 5 — seller signs the subscription plan definition once; buyers then
 // purchase it with a normal x402 payment (no seller signature per sale).
-const SUBSCRIBE_TYPES = {
+// Not wired up yet (no caller) — kept as the EIP-712 type schema for when
+// seller-signed plan creation ships; prefixed so the linter doesn't flag
+// intentionally-unused scaffolding as dead code.
+const _SUBSCRIBE_TYPES = {
   PlanIntent: [
     { name: 'seller', type: 'address' },
     { name: 'slug', type: 'string' },
@@ -151,7 +154,6 @@ const SUBSCRIBE_TYPES = {
 
 const FEE_BPS = Math.min(2000, Math.max(0, Number(process.env.COVENANT_MARKETPLACE_FEE_BPS ?? 500)))
 
-function subKey(slug, buyer) { return String(slug) + ':' + String(buyer).toLowerCase() }
 function getSub(slug, buyer) {
   const r = stmts.getSub.get(String(slug), String(buyer).toLowerCase())
   if (!r) return null
@@ -287,7 +289,7 @@ async function createListing({ name, description, upstream, price, seller, signa
   // answer with JSON today would only produce refunds later — reject it now.
   // Phase-4: the probe carries the seller's private headers, same as delivery.
   try { await fetchJson(String(upstream), 8000, 0, priv || undefined) }
-  catch (e) { throw new Error(`upstream test failed — endpoint must answer GET with JSON (200): ${e.message}`) }
+  catch (e) { throw new Error(`upstream test failed — endpoint must answer GET with JSON (200): ${e.message}`, { cause: e }) }
   const description2 = description || `${name} — paid API on COVENANT marketplace (USDG, Robinhood 4663)`
   stmts.insertListing.run(
     slug, 'external', String(name), description2, String(upstream), String(price), seller, 'active', Date.now(),

@@ -309,7 +309,7 @@ async function settle(intent, signature, splits = null, chainId = DEFAULT_CHAIN_
     // confusing 'insufficient funds for intrinsic transaction cost' from ethers
     const gasNeeded = (await w.provider.getFeeData()).maxFeePerGas * 160000n
     if (gas < gasNeeded) return { success: false, errorReason: `gateway settlement wallet on ${c.name} is low on gas (${ethers.formatEther(gas)}, needs ~${ethers.formatEther(gasNeeded)}) — payment NOT taken, top up the facilitator wallet`, payer: intent.from }
-  } catch (e) {
+  } catch (_e) {
     return { success: false, errorReason: `cannot read ${c.usdcSymbol} state from ${c.name} — RPC may be busy, retry in a moment`, payer: intent.from }
   }
 
