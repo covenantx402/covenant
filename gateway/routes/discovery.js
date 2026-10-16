@@ -15,7 +15,7 @@
 // `handle(req, res, url)` function; call it early in the request handler
 // and return immediately if it returns true (route was handled here).
 function registerDiscoveryRoutes({
-  x402r, facilitator, marketplace, vault, wallets, keys, sessions, reputation,
+  x402r, facilitator, marketplace, vault, wallets, keys, sessions, reputation, solana,
   send, PUBLIC_ORIGIN, DOMAIN_NAME, DOMAIN_VERSION,
 }) {
   function health(req, res) {
@@ -227,6 +227,25 @@ function registerDiscoveryRoutes({
             security: [], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
             responses: { '200': { description: 'channel record' }, '404': { description: 'unknown channel' } }
           }
+        },
+        '/x402/solana/info': {
+          get: {
+            operationId: 'solana_info', summary: 'x402 "exact" scheme on Solana devnet — fee payer address + network info (free)',
+            description: 'See README "Solana support" section — devnet only, structural tx verification, no amount/recipient matching against instruction bytes yet (flagged honestly as a gap, not silently skipped).',
+            security: [], responses: { '200': { description: '{ network, name, asset, configured, feePayer, minSettlePriceUsd }' } }
+          }
+        },
+        '/x402/solana/verify': {
+          post: {
+            operationId: 'solana_verify', summary: 'Verify a partially-signed Solana transaction matches this facilitator\'s fee payer — pure decode, no RPC call',
+            security: [], responses: { '200': { description: '{ ok: true, payer }' }, '400': { description: 'wrong fee payer, already fully signed, or malformed transaction' } }
+          }
+        },
+        '/x402/solana/settle': {
+          post: {
+            operationId: 'solana_settle', summary: 'Co-sign a verified transaction as fee payer and submit it to Solana devnet',
+            security: [], responses: { '200': { description: '{ success: true, transaction, network }' }, '400': { description: 'verify failed, or the devnet broadcast itself failed' } }
+          }
         }
       }
     })
@@ -314,6 +333,25 @@ function registerDiscoveryRoutes({
         extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION, receiverAuthorizer: view.spender || null, withdrawDelay: null },
       })
       if (view.spender) signers[network] = [view.spender]
+    }
+    // Solana "exact" scheme (devnet) via /x402/solana/* — advertised only
+    // when a fee payer key is actually configured, same honesty standard
+    // as every EVM chain's signers{} entry (empty rather than claiming a
+    // capability nothing backs). Separate loop: solana.js's network isn't
+    // part of the EVM chains registry's shape (no numeric chainId).
+    if (solana && solana.isConfigured()) {
+      kinds.push({
+        x402Version: 1,
+        scheme: 'exact',
+        network: solana.NETWORK.caip2,
+        asset: solana.NETWORK.usdcMint,
+        extra: { name: DOMAIN_NAME, version: DOMAIN_VERSION, feePayer: true },
+      })
+      // signers{} for Solana would need the fee payer's resolved address,
+      // which solana.js only resolves lazily (on first verify/settle
+      // call, not eagerly at startup) — report the network as a
+      // supported kind without forcing early key resolution just to
+      // answer a discovery GET.
     }
     send(res, 200, {
       x402Version: 1,

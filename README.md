@@ -248,6 +248,54 @@ curl -X POST https://gateway.covenantx402.com/x402/batch/voucher \
 curl -X POST https://gateway.covenantx402.com/x402/batch/claim -d '{"channelId":"0x..."}'
 ```
 
+## Solana support (devnet, exact scheme)
+
+Every other chain in this gateway is EVM (`eip155:*`). `/x402/solana/*`
+implements the x402 spec's `exact` scheme for Solana (`solana:*`) —
+architecturally different, not an EVM port, because Solana's signature
+model is: the buyer builds a versioned transaction with an SPL
+`TransferChecked` instruction, signs it with their Ed25519 key, and
+leaves the **fee payer's** signature slot empty. The facilitator verifies
+the transaction's structure (pure decode, no RPC call), adds its own
+signature as fee payer — the final required signature — and submits it.
+The facilitator pays the Solana network fee, same "buyer never pays gas"
+model every EVM chain here already has.
+
+```bash
+curl https://gateway.covenantx402.com/x402/solana/info
+# { network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", asset: "<devnet USDC mint>", configured, feePayer }
+curl -X POST https://gateway.covenantx402.com/x402/solana/verify -d '{"transaction":"<base64>"}'
+curl -X POST https://gateway.covenantx402.com/x402/solana/settle -d '{"transaction":"<base64>"}'
+```
+
+**Honest status — what's real and what isn't yet:**
+- **Devnet only.** No mainnet fee payer is funded or configured. Going
+  live on mainnet needs its own funded wallet and its own settlement-cost
+  floor measurement (Solana fees are typically a few thousand lamports —
+  likely the cheapest rail this gateway would support, cheaper than
+  Base/Arbitrum — but that needs a real spot measurement before
+  shipping, the same discipline chains.js's EVM floors were held to).
+- **Structural verification only.** `verify()` confirms the transaction
+  decodes, the fee payer slot matches this facilitator, and a real
+  buyer signature is present. It does **not yet** check the transferred
+  amount/recipient/asset against the specific `TransferChecked`
+  instruction bytes — a buyer could currently build a transaction that
+  verifies structurally but pays the wrong amount or the wrong
+  recipient. This is a real gap, not a hidden one: fixing it is adding
+  instruction-level decoding of the SPL Token program's
+  `TransferChecked` layout and comparing against the advertised
+  `PaymentRequirements`, the same job `validateQuotedIntent()` already
+  does for every EVM route in `server.js`.
+- **End-to-end on-chain testing was blocked, not skipped.** Public
+  Solana devnet airdrop faucets were rate-limited/exhausted during
+  development (`429` from `api.devnet.solana.com`, the official
+  `faucet.solana.com` requiring interactive browser/captcha flow with
+  no plain API). The co-sign + submit mechanics were verified against
+  the real devnet RPC with an unfunded throwaway keypair — confirmed it
+  reaches `Transaction simulation failed` (a real devnet rejection, not
+  a crash or a silently-swallowed error) rather than completing a real
+  settlement. A funded devnet wallet would need to close that last gap.
+
 ## Gateway endpoints
 
 **Discovery (free, no auth):**

@@ -19,6 +19,7 @@ const reputation = require('./reputation')
 const x402v2 = require('./x402-v2')
 const uptoDemo = require('./upto-demo')
 const batch = require('./batch')
+const solana = require('./solana')
 
 // marketplace slugs must never collide with COVENANT's own paid routes
 marketplace.setReservedSlugCheck((slug) => x402r.has(slug))
@@ -93,7 +94,7 @@ function send(res, code, obj) {
 
 const { registerDiscoveryRoutes } = require('./routes/discovery')
 const discovery = registerDiscoveryRoutes({
-  x402r, facilitator, marketplace, vault, wallets, keys, sessions, reputation,
+  x402r, facilitator, marketplace, vault, wallets, keys, sessions, reputation, solana,
   send, PUBLIC_ORIGIN, DOMAIN_NAME, DOMAIN_VERSION,
 })
 
@@ -527,6 +528,40 @@ const server = http.createServer(async (req, res) => {
     const ch = batch.getChannel(id)
     if (!ch) { send(res, 404, { error: 'unknown channel' }); return }
     send(res, 200, ch)
+    return
+  }
+
+  /* x402 "exact" scheme on Solana (devnet) — see solana.js header comment
+     for the full architecture (partially-signed tx -> facilitator
+     co-signs as fee payer -> submit). Two endpoints matching the generic
+     facilitator verify/settle shape every EVM chain already uses, so a
+     caller doesn't need Solana-specific glue beyond building the
+     transaction itself:
+       GET  /x402/solana/info         — fee payer address + network (free)
+       POST /x402/solana/verify       — structural check, no RPC call
+       POST /x402/solana/settle       — co-sign + submit (the one on-chain step) */
+  if (req.method === 'GET' && url === '/x402/solana/info') {
+    send(res, 200, solana.publicView())
+    return
+  }
+
+  if (req.method === 'POST' && url === '/x402/solana/verify') {
+    readBody(req, async (err, payload) => {
+      if (err) { send(res, 400, { error: 'bad json' }); return }
+      const v = await solana.verify({ transaction: payload.transaction, payTo: payload.payTo, amount: payload.amount, asset: payload.asset })
+      send(res, v.ok ? 200 : 400, v.ok ? v : { error: v.reason })
+    })
+    return
+  }
+
+  if (req.method === 'POST' && url === '/x402/solana/settle') {
+    readBody(req, async (err, payload) => {
+      if (err) { send(res, 400, { error: 'bad json' }); return }
+      const v = await solana.verify({ transaction: payload.transaction })
+      if (!v.ok) { send(res, 400, { success: false, errorReason: v.reason }); return }
+      const result = await solana.settle({ transaction: payload.transaction })
+      send(res, result.success ? 200 : 400, result)
+    })
     return
   }
 
