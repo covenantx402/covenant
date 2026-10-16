@@ -199,6 +199,55 @@ curl https://gateway.covenantx402.com/x402/upto/echo?text=hello+world
 # 402 { accepts: [{ scheme: "upto", maxAmountRequired: "50000", ... }] } — the ceiling, not the real charge
 ```
 
+## Batch settlement: verify N requests for free, settle once
+
+The x402 spec's `batch-settlement` scheme describes a genuine bidirectional
+payment channel with an on-chain escrow deposit and a non-cooperative
+withdraw with a dispute timer (CDP's spec calls this `withdrawDelay`,
+900-2,592,000 seconds). **COVENANT doesn't have that smart contract
+deployed.** `/x402/batch/*` implements a simpler "running tab" that gets the
+same economic benefit — verify many requests for free, pay gas once instead
+of once per request — using nothing but the approve+transferFrom pattern
+every other route here already uses:
+
+1. `POST /x402/batch/open` — buyer approves the facilitator spender (same
+   `approve()` as every other route), then opens a channel: `{ channelId,
+   payer, payTo, validBefore, domain, types }` for signing vouchers against.
+2. Each request, the buyer signs a **voucher**: not a per-request amount,
+   but the channel's new **cumulative total** ("I now owe up to X total").
+   `POST /x402/batch/voucher` verifies it — pure EIP-712 signature recovery
+   plus a monotonic-increase check against the channel's current
+   high-water mark. **No RPC call, no gas — genuinely free**, exactly like
+   the spec's documented behavior.
+3. Whenever the facilitator chooses (channel close, a threshold, a cron),
+   `POST /x402/batch/claim` executes **one** `transferFrom` for the
+   **net-new** amount (latest cumulative minus whatever was already
+   claimed) — so a channel can be claimed more than once across its
+   lifetime without double-spending the already-settled portion.
+
+**What this does NOT have that a real payment-channel contract would:**
+- **No escrow.** The buyer's USDC/USDG sits in their own wallet the whole
+  time, same as every other route here. Their safety valve if they
+  distrust the facilitator is revoking the ERC-20 approval — immediate, no
+  on-chain dispute window needed, unlike a channel contract's
+  non-cooperative withdraw.
+- **No facilitator-side dispute mechanism.** If the facilitator claims a
+  channel and refuses to deliver, that's the same trust model COVENANT
+  already has for every other scheme (deliver-then-claim for marketplace
+  listings, claim-then-deliver for owned routes) — batch-settlement
+  changes *when* the on-chain claim happens, not the underlying trust
+  boundary.
+
+```bash
+curl -X POST https://gateway.covenantx402.com/x402/batch/open \
+  -d '{"payer":"0x...","chainId":4663}'
+# sign a voucher against the returned domain/types, then:
+curl -X POST https://gateway.covenantx402.com/x402/batch/voucher \
+  -d '{"channelId":"0x...","cumulativeValue":"10000","signature":"0x..."}'
+# repeat with higher cumulativeValue per request — all free — then once:
+curl -X POST https://gateway.covenantx402.com/x402/batch/claim -d '{"channelId":"0x..."}'
+```
+
 ## Gateway endpoints
 
 **Discovery (free, no auth):**
