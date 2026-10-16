@@ -1,0 +1,37 @@
+services:
+  gateway:
+    build: .
+    image: covenant-gateway
+    ports:
+      - "8792:8792"
+    environment:
+      # Required — at minimum point this at a Robinhood Chain RPC.
+      COVENANT_RPC_UPSTREAM: ${COVENANT_RPC_UPSTREAM:-https://robinhood-rpc.publicnode.com}
+      COVENANT_PORT: 8792
+      COVENANT_HOST: 0.0.0.0
+      COVENANT_DB_PATH: /app/gateway/data/gateway.db
+      # Optional extra chains — leave unset to disable that rail (GET /chains
+      # reports configured:false, nothing else breaks).
+      COVENANT_RPC_ETHEREUM: ${COVENANT_RPC_ETHEREUM:-}
+      COVENANT_RPC_BASE: ${COVENANT_RPC_BASE:-}
+      COVENANT_RPC_ARBITRUM: ${COVENANT_RPC_ARBITRUM:-}
+      # Required for settlement (agents can still hit free/discovery routes
+      # without this; paid routes return a clear "not configured" error).
+      COVENANT_SETTLE_KEY: ${COVENANT_SETTLE_KEY:-}
+      COVENANT_X402_PAYTO: ${COVENANT_X402_PAYTO:-0x0000000000000000000000000000000000000000}
+      COVENANT_VAULT_KEY: ${COVENANT_VAULT_KEY:-}
+      COVENANT_TRUSTED_PROXIES: ${COVENANT_TRUSTED_PROXIES:-}
+    volumes:
+      # Persist the SQLite DB (vault entries, wallets, keys, settlements)
+      # across container restarts/rebuilds — this is the only durable state.
+      - covenant-data:/app/gateway/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8792/x402/health').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  covenant-data:

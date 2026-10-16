@@ -300,8 +300,11 @@ function readBody(req, cb) {
   let body = ''
   req.on('data', c => { body += c; if (body.length > 5e4) req.destroy() })
   req.on('end', () => {
-    let payload = {}
-    if (body) { try { payload = JSON.parse(body) } catch { cb(null, null); return } }
+    if (!body) { cb(null, {}); return }
+    let payload
+    try { payload = JSON.parse(body) } catch { cb(new Error('bad json')); return }
+    // JSON `null` and scalars parse without error, but handlers read fields off them.
+    if (payload === null || typeof payload !== 'object') { cb(new Error('bad json')); return }
     cb(null, payload)
   })
 }
@@ -378,7 +381,7 @@ const server = http.createServer(async (req, res) => {
       `covenant_sessions_active ${Number(sessions.stats().activeSessions || 0)}`,
       '# HELP covenant_vault_entries Encrypted secrets currently stored in the vault.',
       '# TYPE covenant_vault_entries gauge',
-      `covenant_vault_entries ${vault.list().length}`,
+      `covenant_vault_entries ${vault.count()}`,
       '# HELP covenant_vault_broker_calls_total Prompts run with vault-injected secrets.',
       '# TYPE covenant_vault_broker_calls_total counter',
       `covenant_vault_broker_calls_total ${Number(vaultStats.brokered || 0)}`,
@@ -630,6 +633,9 @@ const server = http.createServer(async (req, res) => {
       send402(res, { x402Version: 1, error: 'PAYMENT_REQUIRED', accepts: [reqt] })
       return
     }
+    // One receipt = one delivery. Without this, a single X-PAYMENT replays
+    // forever: plan grants and marketplace payouts re-run on every request.
+    if (!facilitator.claimReceipt(paid.nonce, paid.chainId)) { send(res, 409, { error: 'receipt already redeemed' }); return }
     // settled on-chain (nonce anchored to a tx) → deliver the REAL resource.
     if (mkt && wantPlan) {
       // Tahap 5 — plan purchase: payment already settled at the discounted
@@ -960,7 +966,7 @@ const server = http.createServer(async (req, res) => {
         gateway: { ok: true, ms: Date.now() - t0 },
         rpc: rpc,
         settlement: { ok: !!f.spender, settled: f.settled, spender: f.spender },
-        vault: { ok: true, entries: vault.list().length },
+        vault: { ok: true, entries: vault.count() },
         keys: { ok: true, count: keys.count() },
         wallets: { ok: true, count: wallets.count() },
         apis: { ok: true, count: x402r.list().length },
@@ -1269,7 +1275,7 @@ const server = http.createServer(async (req, res) => {
       onchain: { settled: f.settled, totalSettledUsdg: f.totalSettledUsdg, pattern: f.pattern, recent: f.recent || [] },
       sessions: sessions.stats(),
       reputation: reputation.stats(),
-      vault: { entries: vault.list().length, brokered: vault.stats().brokered },
+      vault: { entries: vault.count(), brokered: vault.stats().brokered },
       wallets: wallets.count(),
       keys: keys.count(),
       topPaths: top,
@@ -1298,7 +1304,7 @@ const server = http.createServer(async (req, res) => {
   // ============ authenticated endpoints ============
 
   if (req.method === 'GET' && url === '/vault/entries') {
-    res.end(JSON.stringify(vault.list()))
+    res.end(JSON.stringify(vault.list(agent.id)))
     return
   }
 
@@ -1306,7 +1312,7 @@ const server = http.createServer(async (req, res) => {
     readBody(req, (err, payload) => {
       if (err) { send(res, 400, { error: 'bad json' }); return }
       try {
-        const rec = vault.put(payload.name, payload.value)
+        const rec = vault.put(agent.id, payload.name, payload.value)
         vault.audit('set', payload.name)
         send(res, 201, { ...rec, note: 'value stored encrypted; never returned' })
       } catch (e) { send(res, 400, { error: e.message || String(e) }) }
@@ -1317,7 +1323,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'DELETE' && url === '/vault/entries') {
     readBody(req, (err, payload) => {
       if (err) { send(res, 400, { error: 'bad json' }); return }
-      const had = vault.del(payload.name)
+      const had = vault.del(agent.id, payload.name)
       vault.audit('delete', payload.name)
       send(res, had ? 200 : 404, had ? { ok: true } : { error: 'not found' })
     })
@@ -1327,7 +1333,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && url === '/vault/broker') {
     readBody(req, (err, payload) => {
       if (err) { send(res, 400, { error: 'bad json' }); return }
-      const r = vault.resolve(String(payload.text || ''), { scrub: payload.scrub !== false })
+      const r = vault.resolve(agent.id, String(payload.text || ''))
       vault.audit('broker', r.used[0] || null, { placeholders: r.used.length })
       send(res, 200, { body: r.body, used: r.used, scrubbed: true })
     })
@@ -1338,7 +1344,7 @@ const server = http.createServer(async (req, res) => {
     readBody(req, (err, payload) => {
       if (err) { send(res, 400, { error: 'bad json' }); return }
       try {
-        const rec = wallets.create(payload)
+        const rec = wallets.create(agent.id, payload)
         send(res, 201, rec)
       } catch (e) { send(res, 400, { error: e.message || String(e) }) }
     })
@@ -1346,7 +1352,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && url === '/wallets') {
-    res.end(JSON.stringify(wallets.list()))
+    res.end(JSON.stringify(wallets.list(agent.id)))
     return
   }
 
@@ -1376,4 +1382,10 @@ const server = http.createServer(async (req, res) => {
   send(res, 404, { error: 'not found' })
 })
 
-server.listen(PORT, '127.0.0.1', () => console.log(`covenant-rpc-proxy on 127.0.0.1:${PORT}`))
+// Bind host is configurable: 127.0.0.1 by default (safe when a reverse proxy
+// / tunnel sits in front, the deployment this was built for), 0.0.0.0 when
+// explicitly opted in (e.g. inside a container, where 127.0.0.1 would only
+// be reachable from within the container itself and port mapping to the
+// host would silently do nothing).
+const HOST = process.env.COVENANT_HOST || '127.0.0.1'
+server.listen(PORT, HOST, () => console.log(`covenant-rpc-proxy on ${HOST}:${PORT}`))

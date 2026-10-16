@@ -21,12 +21,14 @@ db.pragma('foreign_keys = ON')
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS vault_entries (
-  name TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  name TEXT NOT NULL,
   enc TEXT NOT NULL,
   iv TEXT NOT NULL,
   tag TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  hits INTEGER NOT NULL DEFAULT 0
+  hits INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (owner, name)
 );
 
 CREATE TABLE IF NOT EXISTS vault_audit (
@@ -51,6 +53,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_keys_hash ON agent_keys(hash);
 
 CREATE TABLE IF NOT EXISTS wallets (
   address TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
   label TEXT NOT NULL,
   vault_ref TEXT NOT NULL,
   chain_id INTEGER NOT NULL,
@@ -304,6 +307,39 @@ if (!hasColumn('settlements', 'chain_id')) {
 if (!hasColumn('sessions', 'chain_id')) {
   db.exec(`ALTER TABLE sessions ADD COLUMN chain_id INTEGER NOT NULL DEFAULT 4663;`)
   console.log('[db] migrated sessions -> added chain_id column')
+}
+
+// Legacy wallets have no owner. Owner '' matches no authenticated key, so
+// they stay in place (nothing deleted) and are hidden from every API caller.
+if (!hasColumn('wallets', 'owner')) {
+  db.exec("ALTER TABLE wallets ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
+  console.log('[db] wallets: added owner column; legacy wallets are unowned')
+}
+
+// --- Migration: scope vault_entries per owner (agent key id) ---
+// Legacy rows have no owner and cannot be attributed to any key. They are
+// kept (still encrypted, nothing deleted) under owner '', which no
+// authenticated key id can match, so they are unreachable through the API.
+if (!hasColumn('vault_entries', 'owner')) {
+  db.transaction(() => {
+    db.exec(`
+      ALTER TABLE vault_entries RENAME TO vault_entries_legacy;
+      CREATE TABLE vault_entries (
+        owner TEXT NOT NULL,
+        name TEXT NOT NULL,
+        enc TEXT NOT NULL,
+        iv TEXT NOT NULL,
+        tag TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        hits INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (owner, name)
+      );
+      INSERT INTO vault_entries (owner, name, enc, iv, tag, created_at, hits)
+        SELECT '', name, enc, iv, tag, created_at, hits FROM vault_entries_legacy;
+      DROP TABLE vault_entries_legacy;
+    `)
+  })()
+  console.log('[db] migrated vault_entries -> per-owner (owner, name) key; legacy rows are unowned')
 }
 
 db.exec(`CREATE INDEX IF NOT EXISTS idx_settlements_chain ON settlements(chain_id);`)

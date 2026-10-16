@@ -11,6 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1ecb74.svg" alt="MIT License"></a>
   <img src="https://img.shields.io/badge/x402-v1%20%2B%20v2-1ecb74.svg" alt="x402 v1 + v2">
   <img src="https://img.shields.io/badge/chains-4%20(Robinhood%2C%20Ethereum%2C%20Base%2C%20Arbitrum)-1ecb74.svg" alt="4 chains supported">
+  <img src="https://img.shields.io/badge/docker-ready-1ecb74.svg" alt="Docker ready">
 </p>
 
 <p align="center"><img src="assets/banner.png" width="100%" alt="COVENANT banner" /></p>
@@ -49,6 +50,7 @@ gateway/   Zero-dependency HTTP gateway: RPC proxy, x402 v1+v2, vault, facilitat
 kit/       TypeScript middleware (@covenantx402/x402-kit) — Express paywall + usage analytics
 examples/  Runnable examples: paywalled API, agent client that pays
 skill/     Agent skill file (SKILL.md) — teach any agent (Claude/Cursor/Hermes) to use COVENANT
+Dockerfile, docker-compose.yml   Multi-stage build + one-command run (see Quick start below)
 ```
 
 ## Quick start (gateway)
@@ -62,6 +64,21 @@ node server.js         # listens on 127.0.0.1:8792
 
 Then explore the machine-readable contract: `curl http://127.0.0.1:8792/openapi.json`
 
+### Quick start (Docker)
+
+```bash
+cp gateway/.env.example .env     # fill in at least COVENANT_RPC_UPSTREAM
+docker compose up --build
+curl http://127.0.0.1:8792/x402/health
+```
+
+Data (vault entries, wallets, keys, settlement/nonce history) persists in a
+named volume (`covenant-data`) across restarts and rebuilds. The container
+binds `0.0.0.0` internally (`COVENANT_HOST=0.0.0.0`, set in `docker-compose.yml`)
+so the `-p`/`ports:` mapping actually reaches it — the default bare-metal
+bind is `127.0.0.1`, which only works when something else (nginx, a
+Cloudflare tunnel) is on the same host.
+
 ### Environment
 
 | Variable | Required | Purpose |
@@ -69,6 +86,7 @@ Then explore the machine-readable contract: `curl http://127.0.0.1:8792/openapi.
 | `COVENANT_RPC_UPSTREAM` | yes | JSON-RPC URL for Robinhood Chain (e.g. `https://robinhood-rpc.publicnode.com`). Comma-separate for automatic failover (`ethers.FallbackProvider`, quorum 1) on the settlement path — recommended in production. |
 | `COVENANT_RPC_ETHEREUM` / `COVENANT_RPC_BASE` / `COVENANT_RPC_ARBITRUM` | for those chains | Same comma-separated-failover RPC config, one per additional chain. A chain with no RPC configured just reports `configured: false` on `GET /chains` — the other chains keep working. |
 | `COVENANT_PORT` | no | Listen port (default `8792`) |
+| `COVENANT_HOST` | no | Bind address (default `127.0.0.1`). Set to `0.0.0.0` when running in a container or anything else that needs the port reachable from outside localhost. |
 | `COVENANT_SETTLE_KEY` | for settlement | Private key of the facilitator's settlement wallet (the spender agents approve) — same key, reused across all four chains (one wallet, four networks). |
 | `COVENANT_X402_PAYTO` | no | Default recipient address for paid routes |
 | `COVENANT_VAULT_KEY` | recommended | Pepper for vault encryption at rest. Derived from the RPC URL if unset — set your own in production |
@@ -188,6 +206,7 @@ CI (`.github/workflows/ci.yml`) runs both on every push/PR to `main`.
 - `POST /keys` is intentionally open for frictionless onboarding — rate-limit it at your edge if you expose the gateway publicly.
 - `COVENANT_SETTLE_KEY` can pull any USDG amount agents have approved to it. Run it hot with a small float; keep the bulk cold.
 - The RPC proxy (`POST /`) is a strict method whitelist — no state-changing methods pass through.
+- **Vault entries and wallets are scoped per agent key (`owner` in SQLite), not global.** An agent key can only read/write/delete/broker its own secrets and only lists its own wallets — verified by an isolation test in `gateway/test/smoke.js` (mint two keys, confirm key B gets an empty list and an unresolved `{{placeholder}}` for key A's secret, never the value). Legacy rows from before this scoping existed are kept (nothing deleted) under an unreachable empty-string owner.
 
 ## License
 
