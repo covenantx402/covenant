@@ -40,6 +40,30 @@ const crypto = require('crypto')
 const db = require('./db')
 const chains = require('./chains')
 
+// Per-channel claim lock. Found by audit: two concurrent POST
+// /x402/batch/claim calls for the SAME channel both read netClaimable()
+// BEFORE either records its claim, both see the identical net amount,
+// and both would execute a real transferFrom for that amount —
+// overcharging the buyer beyond what any single voucher's cumulative
+// total actually authorized (the buyer signed "owe up to X total", not
+// "X total, claimable more than once concurrently"). Must span the
+// ENTIRE claim flow (netClaimable check -> the async on-chain
+// transferFrom -> recordClaim), not just the synchronous DB read, since
+// the window where two requests could interleave is exactly the time
+// spent waiting on the RPC call in between. In-memory Set is sufficient
+// here: claims are a low-frequency, operator-triggered action (not a
+// per-request hot path like verifyVoucher), and this process is the
+// only writer to batch_channels.
+const _claimingChannels = new Set()
+function tryLockChannel(channelId) {
+  if (_claimingChannels.has(channelId)) return false
+  _claimingChannels.add(channelId)
+  return true
+}
+function unlockChannel(channelId) {
+  _claimingChannels.delete(channelId)
+}
+
 const DOMAIN_NAME = 'COVENANT'
 const DOMAIN_VERSION = '1'
 
@@ -70,6 +94,14 @@ const stmts = {
   bumpVoucher: db.prepare('UPDATE batch_channels SET last_cumulative_value = ?, last_nonce = ?, vouchers_verified = vouchers_verified + 1 WHERE id = ?'),
   claim: db.prepare('UPDATE batch_channels SET claimed_value = ?, claimed_tx_hashes = ?, closed = ? WHERE id = ?'),
   listOpenForPayer: db.prepare('SELECT * FROM batch_channels WHERE payer = ? AND closed = 0 ORDER BY opened_at DESC'),
+  // Storage-growth hardening: POST /x402/batch/open is open (no auth, no
+  // cost — same posture as POST /keys), so nothing stops a caller from
+  // opening channels indefinitely and never using them. Sweep expired
+  // channels that NEVER accumulated any claimable value (nothing was
+  // claimed AND nothing is owed) — a channel that was actually used keeps
+  // its history. Piggybacks on openChannel() the same way sessions.js's
+  // sweepExpired piggybacks on stats() — no separate cron needed.
+  sweepUnusedExpired: db.prepare("DELETE FROM batch_channels WHERE valid_before <= ? AND last_cumulative_value = '0' AND claimed_value = '0'"),
 }
 
 function rowToChannel(r) {
@@ -86,6 +118,7 @@ function rowToChannel(r) {
 function openChannel({ payer, payTo, chainId, validForSec }) {
   if (!payer || !/^0x[0-9a-fA-F]{40}$/.test(payer)) throw new Error('payer must be a 0x address')
   if (!payTo || !/^0x[0-9a-fA-F]{40}$/.test(payTo)) throw new Error('payTo must be a 0x address')
+  stmts.sweepUnusedExpired.run(Math.floor(Date.now() / 1000))
   const id = '0x' + crypto.randomBytes(32).toString('hex')
   const openedAt = Date.now()
   const validBefore = Math.floor(openedAt / 1000) + Math.min(MAX_CHANNEL_LIFETIME_SEC, Math.max(60, Number(validForSec) || 86400))
@@ -168,4 +201,5 @@ function listOpenChannels(payer) {
 module.exports = {
   VOUCHER_TYPES, domainFor, MAX_CHANNEL_LIFETIME_SEC,
   openChannel, getChannel, verifyVoucher, netClaimable, recordClaim, listOpenChannels,
+  tryLockChannel, unlockChannel,
 }
