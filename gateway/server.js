@@ -63,11 +63,27 @@ const RATE_LIMITS = {
    can set that header directly and mint a fresh IP-keyed rate-limit bucket
    on every request otherwise (defeats the 5-keys/hour guard on the open
    POST /keys endpoint entirely). Only honour it when the immediate peer is
-   in COVENANT_TRUSTED_PROXIES (comma-separated IPs, e.g. your own nginx/LB). */
+   in COVENANT_TRUSTED_PROXIES (comma-separated IPs, e.g. your own nginx/LB).
+
+   FOUND BY AUDIT: when fronted by a Cloudflare Tunnel (cloudflared), the
+   peer this process actually sees is cloudflared's own LOOPBACK connection
+   (127.0.0.1) — the same for every real-world client. Without
+   COVENANT_TRUSTED_PROXIES including that loopback address, every
+   anonymous (no-API-key) request across the ENTIRE public domain shares
+   one single rate-limit bucket, which is strictly worse than no rate
+   limiting at the per-client level: one abusive client exhausts the
+   budget for everyone else behind the tunnel. Prefer cf-connecting-ip
+   over x-forwarded-for when both are present and the peer is trusted —
+   Cloudflare's edge sets/owns this header exclusively and rejects a
+   client-spoofed value with its own "error code: 1000" (verified live),
+   whereas x-forwarded-for can still be a chain of untrusted values a
+   misconfigured upstream proxy appended without validation. */
 const TRUSTED_PROXIES = new Set((process.env.COVENANT_TRUSTED_PROXIES || '').split(',').map(s => s.trim()).filter(Boolean))
 function clientIp(req) {
   const peer = req.socket?.remoteAddress || 'unknown'
   if (TRUSTED_PROXIES.has(peer)) {
+    const cfip = (req.headers['cf-connecting-ip'] || '').trim()
+    if (cfip) return cfip
     const xff = (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
     if (xff) return xff
   }
