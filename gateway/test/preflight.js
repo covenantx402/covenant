@@ -3,11 +3,19 @@
 // USDG-nya masih ada. Ini failure mode yang paling gampang kena.
 const { ethers } = require('ethers')
 const fs = require('fs')
+const path = require('path')
 
-for (const l of fs.readFileSync('/root/covenant/proxy/.env', 'utf8').split('\n')) {
-  const m = l.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/)
-  if (m) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '')
+// Portable by default: self-hosters can override this with COVENANT_ENV_FILE.
+const envFile = process.env.COVENANT_ENV_FILE || path.join(__dirname, '..', '.env')
+if (fs.existsSync(envFile)) {
+  for (const l of fs.readFileSync(envFile, 'utf8').split('\n')) {
+    const m = l.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/)
+    if (m) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '')
+  }
+} else {
+  console.warn(`[preflight] no env file at ${envFile}; checking public endpoints only`)
 }
+const demoDir = process.env.COVENANT_DEMO_DIR || path.dirname(envFile)
 const RPC = 'https://robinhood-rpc.publicnode.com'
 const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'
 const GW = process.env.GW || 'http://127.0.0.1:8792'
@@ -37,9 +45,8 @@ async function getJson(path, headers) {
   console.log('  ' + '─'.repeat(58))
 
   // 1. RPC
-  let block = null
   try {
-    block = await p.getBlockNumber()
+    const block = await p.getBlockNumber()
     console.log(`  ${ok(true)} RPC          block ${block}`)
   } catch (e) {
     console.log(`  ${ok(false)} RPC          ${String(e.shortMessage || e.message).slice(0, 40)}`)
@@ -84,7 +91,7 @@ async function getJson(path, headers) {
   }
 
   // 4. agent key (kalau ada)
-  const keyPath = '/root/covenant/proxy/.demo_key'
+  const keyPath = path.join(demoDir, '.demo_key')
   if (fs.existsSync(keyPath)) {
     const secret = fs.readFileSync(keyPath, 'utf8').trim()
     const an = await getJson('/analytics/keys', { Authorization: 'Bearer ' + secret })
@@ -95,7 +102,7 @@ async function getJson(path, headers) {
   }
 
   // 5. wallet demo (kalau ada)
-  const wPath = '/root/covenant/proxy/.demo_wallet'
+  const wPath = path.join(demoDir, '.demo_wallet')
   if (fs.existsSync(wPath)) {
     const txt = fs.readFileSync(wPath, 'utf8')
     const addr = (txt.match(/DEMO_WALLET_ADDRESS=(\S+)/) || [])[1]
