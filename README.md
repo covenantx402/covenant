@@ -368,7 +368,18 @@ CI (`.github/workflows/ci.yml`) runs both on every push/PR to `main`.
 
 ## Agent skill
 
-[`skill/SKILL.md`](skill/SKILL.md) is a drop-in Markdown skill file — point Claude/Cursor/Hermes/any skill-aware agent at it and it learns the full payment + vault flow without further prompting.
+[`skill/SKILL.md`](skill/SKILL.md) is a drop-in Markdown skill file for Claude Code, Cursor, Hermes, and other skill-aware agents. It teaches the USDG / Robinhood Chain x402 flow, vault boundary, and explicit-payment safety rules.
+
+### Claude Code
+
+```bash
+mkdir -p .claude/skills/covenant-x402
+cp skill/SKILL.md .claude/skills/covenant-x402/SKILL.md
+export COVENANT_GATEWAY=https://gateway.covenantx402.com
+claude
+```
+
+Start with a safe prompt: “Use the Covenant skill. Discover the paid APIs and inspect `/x402/premium`. Do not make a payment.” For a complete, recording-ready proof sequence, see [`docs/claude-code-proof.md`](docs/claude-code-proof.md).
 
 ## Security notes (read before deploying)
 

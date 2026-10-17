@@ -1,136 +1,110 @@
 ---
 name: covenant-x402
-description: Pay for and monetize agent APIs with USDG on Robinhood Chain 4663 via COVENANT. Use when an agent needs to call paid endpoints, store secrets safely, or serve paid APIs.
-version: 1.0.0
+description: Pay for and monetize agent APIs with USDG on Robinhood Chain 4663 via COVENANT. Use when an agent needs to discover paid endpoints, make an approved payment, or store credentials safely.
+version: 1.1.0
 ---
 
-# COVENANT — x402 v2 payments + vault for agents (Robinhood Chain 4663)
+# COVENANT — x402 payments + vault for agents
 
-Huge update coming next week: COVENANT payment rails for agents, with paid endpoints in USDG over x402 v2 and instant settlement on Robinhood Chain. The same gateway brokers agent credentials through a live vault so models can use secrets without seeing them — model-proof by design. Open source, MIT.
+COVENANT is payment infrastructure for AI agents on **Robinhood Chain (4663)**. It gates APIs with x402, settles payments in **USDG**, and provides an encrypted credential vault so secret values do not enter an agent prompt or context window.
 
-COVENANT gives you three things:
+## Safety boundary
 
-1. **Payments** — call paid endpoints; price is settled in USDG on-chain.
-2. **Vault** — store secrets by name. Never put real credentials in prompts; reference them as `{{name}}`.
-3. **Wallets** — get a dedicated on-chain wallet for your agent identity.
+Start with discovery and inspection. Do **not** approve tokens, sign a `PaymentIntent`, settle a payment, mint an agent key, create a wallet, or store a secret unless the user explicitly asks for that action. Never print, persist, or repeat a private key, API key, or vault secret in chat output.
 
-Base URL: `http://127.0.0.1:8792` (self-hosted gateway) — override with `COVENANT_GATEWAY`.
+## Gateway selection
 
-## 1. Get an API key (one time)
+Use the public gateway unless the user supplies a self-hosted endpoint:
 
 ```bash
-curl -s -X POST $COVENANT_GATEWAY/keys -H 'content-type: application/json' \
-  -d '{"label":"my-agent"}'
+export COVENANT_GATEWAY="${COVENANT_GATEWAY:-https://gateway.covenantx402.com}"
 ```
 
-Response contains `key: "cvn_..."` — **shown once, save it**. Send it as `Authorization: Bearer ***` on every authenticated call.
-
-## 2. Store a secret in the vault (never in your context)
+For a self-hosted gateway:
 
 ```bash
-curl -s -X POST $COVENANT_GATEWAY/vault/entries \
-  -H "Authorization: Bearer cvn_..." -H 'content-type: application/json' \
-  -d '{"name":"llm_api_key","value":"sk-..."}'
+export COVENANT_GATEWAY="http://127.0.0.1:8792"
 ```
 
-To USE a secret without seeing it, send text containing `{{llm_api_key}}` to the broker — the gateway substitutes it server-side and scrubs it from the response:
+## Safe discovery: inspect paid APIs first
 
 ```bash
-curl -s -X POST $COVENANT_GATEWAY/vault/broker \
-  -H "Authorization: Bearer cvn_..." -H 'content-type: application/json' \
-  -d '{"text":"{\"model\":\"gpt\",\"api_key\":\"{{llm_api_key}}\",\"prompt\":\"hi\"}"}'
+curl -sS "$COVENANT_GATEWAY/x402/apis"
+curl -si "$COVENANT_GATEWAY/x402/premium"
 ```
 
-You receive the resolved request body with the secret already replaced and any readback redacted. You never handle the raw value.
+An unpaid request returns HTTP `402 Payment Required` with:
 
-## 3. Get an agent wallet
+- an `accepts[]` payment requirement in the JSON body;
+- a standards-compatible `Payment-Required` header for x402 v2 clients;
+- an `exact` per-call option and a `covenant-session` option for repeated calls.
 
-```bash
-curl -s -X POST $COVENANT_GATEWAY/wallets/create \
-  -H "Authorization: Bearer cvn_..." -H 'content-type: application/json' \
-  -d '{"label":"my-agent"}'
-```
+On the public Robinhood rail, the asset is USDG at `0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168` with 6 decimals.
 
-Returns address + private key **once** (encrypted copy stays in the vault). Fund it with USDG to make payments.
+## Approved payment flow
 
-## 4. Call a paid endpoint (x402 flow)
+Only continue after the user explicitly approves a payment.
 
-Step 1 — unpaid call returns `402` with requirements:
-
-```bash
-curl -si $COVENANT_GATEWAY/x402/premium
-# header X-PAYMENT-REQUIRED (base64 JSON) → { accepts: [{ maxAmountRequired, payTo, asset, extra: { spender } }] }
-```
-
-Step 2 — approve the spender once (see `examples/pay.js` for full code):
+1. Request a paid route and read its requirement.
+2. Approve the advertised `extra.spender` to spend no more than the route price.
+3. Sign the EIP-712 `PaymentIntent`:
 
 ```js
-usdg.approve(spender, maxAmountRequired)  // USDG: 0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168, chain 4663
+{
+  from,
+  to: payTo,
+  value: maxAmountRequired,
+  validAfter,
+  validBefore,
+  nonce,
+  resource
+}
 ```
 
-Step 3 — sign an EIP-712 `PaymentIntent` in domain `{ name: "COVENANT", version: "1", chainId: 4663, verifyingContract: USDG }`:
+Use this domain exactly:
 
 ```js
-{ from, to: payTo, value: maxAmountRequired, validAfter, validBefore, nonce, resource }
+{
+  name: 'COVENANT',
+  version: '1',
+  chainId: 4663,
+  verifyingContract: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'
+}
 ```
 
-Step 4 — settle and receive the resource:
+4. Submit `{ intent, signature }` to `POST /facilitator/settle`.
+5. Replay the returned receipt as the `X-PAYMENT` header on the same resource request.
+
+The reference implementation is `examples/pay.js`.
+
+## Paid sessions
+
+For repeated requests, select the `accepts[]` entry whose scheme is `covenant-session`. Set `resource: "session"` when settling. A successful response includes a session id and call budget; redeem calls with:
 
 ```bash
-curl -s -X POST $COVENANT_GATEWAY/facilitator/settle \
+curl -sS -X POST "$COVENANT_GATEWAY/session/redeem" \
   -H 'content-type: application/json' \
-  -d '{"intent":{...},"signature":"0x..."}'
-# → { success: true, transaction: "0x..." }
+  -d '{"sessionId":"..."}'
 ```
 
-## 5. Paid sessions (pay once, call many times)
+No additional wallet signature or on-chain transaction is needed for each redemption.
 
-Instead of paying per request, settle once with `resource: "session"`:
+## Agent identity and vault
 
-```bash
-curl -s -X POST $COVENANT_GATEWAY/facilitator/settle \
-  -H 'content-type: application/json' \
-  -d '{"intent":{...,"resource":"session"},"signature":"0x...","extra":{"calls":100,"ttlSec":3600}}'
-# → { success: true, transaction: "0x...", session: { id: "...", callsMax: 100 } }
-```
+These are explicit write actions. Request user approval first.
 
-Then redeem per call — the gateway checks budget/TTL, no on-chain tx needed:
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/keys` | Mint an agent API key; it is shown once. |
+| `POST` | `/vault/entries` | Encrypt and store a secret for that key. |
+| `POST` | `/vault/broker` | Resolve `{{secret_name}}` server-side and scrub readback. |
+| `POST` | `/wallets/create` | Create an agent wallet; its private key is shown once. |
+| `GET` | `/reputation/:address` | Inspect a tx-anchored payment reputation score. |
 
-```bash
-curl -s -X POST $COVENANT_GATEWAY/session/redeem -d '{"sessionId":"..."}'
-```
+## Non-negotiable rules
 
-## 6. Reputation
-
-Your agent's settled payments build an on-chain-anchored reputation score:
-
-```bash
-curl -s $COVENANT_GATEWAY/reputation/0xYOUR_AGENT_WALLET
-# → { score: 42, tier: "established", settledCount: 8, txHashes: [...] }
-```
-
-Services can gate premium routes on tier (`trusted` agents get better rates) — the score is derived from settled tx hashes anyone can verify on-chain.
-
-## Endpoints reference
-
-| Method | Path | Auth | Purpose |
-|---|---|---|---|
-| POST | /keys | — | mint agent key |
-| POST/GET/DELETE | /vault/entries | key | store / list / delete secrets |
-| POST | /vault/broker | key | server-side `{{secret}}` substitution |
-| POST/GET | /wallets/create, /wallets | key | agent wallets |
-| GET/DELETE | /keys | key | list / revoke keys |
-| GET | /x402/apis, /x402/api/:slug, /x402/premium | — | discover + 402 challenge |
-| POST | /facilitator/verify, /facilitator/settle | — | verify / settle payment |
-| POST | /session/redeem | — | redeem paid session (1 of N calls) |
-| GET | /session/:id | — | session status |
-| GET | /reputation, /reputation/:address | — | agent reputation (tx-anchored) |
-| GET | /facilitator, /x402/stats, /vault/status | — | telemetry |
-| POST | / | — | read-only RPC proxy (whitelisted methods) |
-
-## Rules
-
-- Never store plaintext secrets in your context, memory, or logs — vault them.
-- `validBefore` is capped at 600s; sign intents only for payments you intend to make.
-- One nonce per intent; replays are rejected.
-- Chain is 4663 (Robinhood). Asset is USDG, 6 decimals.
+- Never put plaintext secrets in prompts, agent memory, logs, terminal recordings, or chat.
+- A `PaymentIntent` must expire within 600 seconds.
+- Each nonce is single-use; a replay is rejected.
+- Treat `X-PAYMENT` receipts as sensitive payment capability material until redeemed.
+- The public demo rail is **USDG on Robinhood Chain 4663**. Do not claim a successful payment until a settlement response and transaction receipt are available.
