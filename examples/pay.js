@@ -5,11 +5,16 @@
 //   2. approve the facilitator spender once (per amount)
 //   3. sign an EIP-712 PaymentIntent in the USDG domain
 //   4. POST { intent, signature } to /facilitator/settle
+//   5. GET the same endpoint with X-PAYMENT header → 200 + paid content
 //
-// Run: node examples/pay.js <private-key-with-USDG>
+// Run (key via env — safer than a CLI arg which appears in process listings):
+//   WALLET_KEY=0x... node examples/pay.js
+//
+// Or pass as CLI arg (legacy, still works):
+//   node examples/pay.js <private-key-with-USDG>
 const { ethers } = require('ethers')
 
-const GATEWAY = process.env.COVENANT_GATEWAY || 'http://127.0.0.1:8792'
+const GATEWAY = process.env.COVENANT_GATEWAY || 'https://gateway.covenantx402.com'
 const RPC = process.env.COVENANT_RPC_UPSTREAM || 'https://robinhood-rpc.publicnode.com'
 const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'
 const CHAIN_ID = 4663
@@ -35,8 +40,13 @@ const TYPES = {
 }
 
 async function main() {
-  const pk = process.argv[2]
-  if (!pk) { console.error('usage: node examples/pay.js <private-key-with-USDG>'); process.exit(1) }
+  // Accept key from env var (safer) or CLI arg (legacy)
+  const pk = process.env.WALLET_KEY || process.argv[2]
+  if (!pk) {
+    console.error('usage: WALLET_KEY=0x... node examples/pay.js')
+    console.error('   or: node examples/pay.js <private-key-with-USDG>')
+    process.exit(1)
+  }
   const wallet = new ethers.Wallet(pk, new ethers.JsonRpcProvider(RPC))
 
   // 1. hit the paid endpoint, get the 402 requirements
@@ -89,7 +99,13 @@ async function main() {
 
   if (settle.success) {
     console.log('SETTLED on-chain:', settle.transaction)
-    console.log('→ resource delivered (in production the gateway serves the payload here)')
+    // 5. replay the receipt as X-PAYMENT to get the paid content
+    const paid = await fetch(`${GATEWAY}/x402/premium`, {
+      headers: { 'X-PAYMENT': settle.payment },
+    })
+    console.log('→ HTTP', paid.status)
+    const body = await paid.json().catch(() => paid.text())
+    console.log('→ paid response:', JSON.stringify(body, null, 2))
   } else {
     console.error('settle failed:', settle.errorReason)
     process.exit(1)
