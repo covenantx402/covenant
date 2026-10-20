@@ -18,6 +18,16 @@ Claude Desktop / Cursor (`mcp.json`):
 { "mcpServers": { "covenant": { "command": "npx", "args": ["-y", "@covenantx402/mcp"] } } }
 ```
 
+## Hosted endpoint (no install)
+
+A read-only instance is hosted at **`https://mcp.covenantx402.com/mcp`** (Streamable HTTP, stateless):
+
+```bash
+claude mcp add --transport http covenant https://mcp.covenantx402.com/mcp
+```
+
+It exposes the **16 discovery/read tools, 5 resources and 4 prompts**. It holds no wallet, no agent key and no vault, and the spending, identity, vault and wallet tools are **not registered at all** (tested with credentials deliberately placed in its environment). It is rate-limited (120 requests/min per client) and limited to 64 KB requests. To pay, store secrets or create wallets, run the local package below with your own keys.
+
 ## Tools
 
 **Discovery and read (no key, never spend)**
@@ -111,12 +121,13 @@ Use a **disposable wallet holding only a few cents of USDG plus a little gas**. 
 ## Limitations
 
 - One chain (Robinhood Chain 4663), one asset (USDG). Ethereum, Base and Arbitrum are declared by the gateway but are **not settlement-ready**; `covenant_status` shows the live state.
-- stdio transport only (local). No hosted remote endpoint yet.
+- The hosted endpoint is read-only by design. Spending, identity, vault and wallet tools exist only in the local stdio package.
 - `covenant_register_agent` relies on the gateway's open key mint; the agent key is not tied to a wallet identity.
 - The spend budget counts only payments made by this server process and resets on restart.
 
 ## Test
 
 ```bash
-npm install && npm test   # mocked safety tests + real stdio protocol round-trip + live read-only calls
+npm install && npm test   # mocked safety tests + stdio protocol round-trip + live read-only calls + hosted HTTP server tests
+npm run start:http        # run the read-only hosted server locally (COVENANT_MCP_PORT, default 8795)
 ```
