@@ -300,6 +300,9 @@ if (!hasColumn('nonces', 'chain_id')) {
 // nonces.pending: JSON of a broadcast-but-unconfirmed transferFrom, so the
 // nonce is NEVER released while a tx may still land (see facilitator.settle).
 if (!hasColumn('nonces', 'pending')) db.exec('ALTER TABLE nonces ADD COLUMN pending TEXT')
+// Canonicalise legacy nonce casing (replay guard now keys on lowercase). OR IGNORE: if both casings
+// exist, the already-lowercase row is kept.
+db.exec("UPDATE OR IGNORE nonces SET nonce = lower(nonce) WHERE nonce != lower(nonce)")
 // batch_channels.claim_lock: DB-backed (multi-process, restart-safe) claim lock.
 // batch_channels.claim_pending: JSON of a broadcast-but-unrecorded claim.
 if (!hasColumn('batch_channels', 'claim_lock')) db.exec('ALTER TABLE batch_channels ADD COLUMN claim_lock INTEGER')
@@ -376,5 +379,9 @@ if (!hasColumn('vault_entries', 'owner')) {
 }
 
 db.exec(`CREATE INDEX IF NOT EXISTS idx_settlements_chain ON settlements(chain_id);`)
+
+// Must run AFTER the settlements chain_id rebuild above (that copy lists columns explicitly).
+if (!hasColumn('settlements', 'failed_splits')) db.exec('ALTER TABLE settlements ADD COLUMN failed_splits TEXT')
+if (!hasColumn('settlements', 'refund_due')) db.exec('ALTER TABLE settlements ADD COLUMN refund_due TEXT')
 
 module.exports = db

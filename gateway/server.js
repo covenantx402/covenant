@@ -24,6 +24,7 @@ const solana = require('./solana')
 
 // marketplace slugs must never collide with COVENANT's own paid routes
 marketplace.setReservedSlugCheck((slug) => x402r.has(slug))
+x402r.setMarketplaceSlugCheck((slug) => !!marketplace.get(slug) || marketplace.exists(slug))
 
 // COVENANT_RPC_UPSTREAM may be a comma-separated list (see facilitator.js —
 // the settlement path gets real failover via ethers.FallbackProvider). This
@@ -342,10 +343,15 @@ async function deliverByKey(res, slug, mkt, rec, owner, priceAtomic, sub) {
   })
 }
 
+const MAX_BODY = 5e4
 function readBody(req, cb) {
+  const declared = Number(req.headers['content-length'] || 0)
+  if (declared > MAX_BODY) { req.resume(); cb(Object.assign(new Error('payload too large'), { status: 413 })); return }
   let body = ''
-  req.on('data', c => { body += c; if (body.length > 5e4) req.destroy() })
+  let dead = false
+  req.on('data', c => { if (dead) return; body += c; if (body.length > MAX_BODY) { dead = true; req.resume(); cb(Object.assign(new Error('payload too large'), { status: 413 })) } })
   req.on('end', () => {
+    if (dead) return
     if (!body) { cb(null, {}); return }
     let payload
     try { payload = JSON.parse(body) } catch { cb(new Error('bad json')); return }
@@ -425,7 +431,7 @@ const server = http.createServer(async (req, res) => {
   // Register a paid route. Open by design — the 402 gate is the monetization, not the registry.
   if (req.method === 'POST' && url === '/x402/apis') {
     readBody(req, (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       try {
         const rec = x402r.create(payload || {})
         send(res, 201, rec)
@@ -519,7 +525,7 @@ const server = http.createServer(async (req, res) => {
      allowance/floor checks, not an auth wall on these endpoints. */
   if (req.method === 'POST' && url === '/x402/batch/open') {
     readBody(req, (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       const chainId = payload.chainId != null ? Number(payload.chainId) : facilitator.DEFAULT_CHAIN_ID
       if (!facilitator.chains.isSupported(chainId)) { send(res, 400, { error: `unsupported chain: ${chainId}` }); return }
       const payTo = facilitator.publicView(chainId).spender
@@ -534,7 +540,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'POST' && url === '/x402/batch/voucher') {
     readBody(req, (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       const v = batch.verifyVoucher({ ethers, channelId: payload.channelId, cumulativeValue: payload.cumulativeValue, signature: payload.signature })
       send(res, v.ok ? 200 : 400, v.ok ? v : { error: v.reason })
     })
@@ -543,7 +549,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'POST' && url === '/x402/batch/claim') {
     readBody(req, async (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       // Anti-double-claim lock: found by audit — two concurrent requests
       // for the same channel would both read the same net-claimable
       // amount and both execute a real on-chain transferFrom for it,
@@ -604,7 +610,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'POST' && url === '/x402/solana/verify') {
     readBody(req, async (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       const v = await solana.verify({ transaction: payload.transaction, payTo: payload.payTo, amount: payload.amount, asset: payload.asset })
       send(res, v.ok ? 200 : 400, v.ok ? v : { error: v.reason })
     })
@@ -613,7 +619,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'POST' && url === '/x402/solana/settle') {
     readBody(req, async (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       const v = await solana.verify({ transaction: payload.transaction })
       if (!v.ok) { send(res, 400, { success: false, errorReason: v.reason }); return }
       const result = await solana.settle({ transaction: payload.transaction })
@@ -738,12 +744,16 @@ const server = http.createServer(async (req, res) => {
         }
       } else {
         marketplace.recordFail(slug)
+        // Persist the refund obligation BEFORE cancelling the seller legs: if the refund transfer fails the
+        // buyer is still owed and the sweeper retries (previously: neither delivered nor refunded, no record).
+        facilitator.markRefundDue(paid.txHash, paid.chainId, paid.from, paid.value, `upstream fail ${slug}: ${fetchErr}`)
         facilitator.cancelSplits(paid.txHash)
         try {
-          refund = await facilitator.refundPayment({ to: paid.from, value: paid.value, reason: `upstream fail ${slug}: ${fetchErr}` })
+          refund = await facilitator.refundPayment({ to: paid.from, value: paid.value, reason: `upstream fail ${slug}: ${fetchErr}`, chainId: paid.chainId })
+          facilitator.clearRefundDue(paid.txHash, paid.chainId)
           const { sellerShare } = marketplace.splitPrice(mkt.price)
           marketplace.recordRefund(slug, { sellerShareAtomic: sellerShare })
-        } catch (e) { console.error('refund failed for', slug, e.message) }
+        } catch (e) { console.error('refund failed for', slug, e.message, '— queued for retry') }
       }
       x402r.log('paid', { slug, path: '/api/' + slug, price: mkt.price }, { status: 200 })
       send(res, 200, {
@@ -865,7 +875,7 @@ const server = http.createServer(async (req, res) => {
   // selects the domain/asset to verify against — defaults to Robinhood 4663.
   if (req.method === 'POST' && url === '/facilitator/verify') {
     readBody(req, (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       facilitator.verify(payload.intent, payload.signature, payload.chainId).then(v => {
         send(res, 200, { isValid: v.ok, invalidReason: v.reason || undefined, payer: v.payer || undefined })
       })
@@ -882,7 +892,7 @@ const server = http.createServer(async (req, res) => {
   // behavior.
   if (req.method === 'POST' && url === '/facilitator/settle') {
     readBody(req, (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       const chainId = payload.chainId != null ? Number(payload.chainId) : facilitator.DEFAULT_CHAIN_ID
       if (!facilitator.chains.isSupported(chainId)) { send(res, 400, { error: `unsupported chain: ${chainId}` }); return }
       if (!facilitator.isConfigured(chainId)) { send(res, 503, { error: `chain unavailable: settlement RPC is not configured for ${facilitator.chains.getChain(chainId).name}` }); return }
@@ -946,7 +956,7 @@ const server = http.createServer(async (req, res) => {
   // redeem a paid session for one call
   if (req.method === 'POST' && url === '/session/redeem') {
     readBody(req, (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       const r = sessions.redeem(payload.sessionId)
       if (!r.ok) { send(res, 402, { error: 'PAYMENT_REQUIRED', reason: r.reason }); return }
       send(res, 200, { ok: true, callsRemaining: r.remaining })
@@ -1016,7 +1026,7 @@ const server = http.createServer(async (req, res) => {
   // frictionless for new agents; everything sensitive is behind the key itself.
   if (req.method === 'POST' && url === '/keys') {
     readBody(req, (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       const rec = keys.mint(payload.label)
       vault.audit('key-mint', rec.id, { label: rec.label })
       send(res, 201, rec)
@@ -1096,7 +1106,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === 'POST' && url === '/x402/marketplace/list') {
     readBody(req, async (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       try {
         const { rec, split } = await marketplace.createListing(payload || {})
         x402r.log('create', { slug: rec.slug, path: '/api/' + rec.slug, price: rec.price }, { status: 201 })
@@ -1113,7 +1123,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === 'POST' && url === '/x402/marketplace/revoke') {
     readBody(req, (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       try {
         const rec = marketplace.revoke(payload || {})
         send(res, 200, { ok: true, slug: rec.slug, status: rec.status })
@@ -1150,7 +1160,7 @@ const server = http.createServer(async (req, res) => {
   // 2) redeem a settled top-up receipt → credit the ledger
   if (req.method === 'POST' && url === '/x402/balance/redeem') {
     readBody(req, (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       const paid = paidFor(payload['x-payment'] || payload.xPayment, PUBLIC_ORIGIN + '/x402/balance/topup')
       if (!paid) { send(res, 402, { error: 'PAYMENT_REQUIRED', reason: 'settle the top-up intent first (POST /facilitator/settle), then redeem its receipt' }); return }
       if (!facilitator.claimReceipt(paid.nonce)) { send(res, 409, { error: 'receipt already redeemed' }); return }
@@ -1163,7 +1173,7 @@ const server = http.createServer(async (req, res) => {
   // 3) create an API key (one signature per key, then zero signatures per call)
   if (req.method === 'POST' && url === '/x402/balance/keys') {
     readBody(req, (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       const v = balance.verifyKeyIntent(payload.intent, payload.signature, facilitator.DOMAIN)
       if (!v.ok) { send(res, 401, { error: v.reason }); return }
       if (!facilitator.claimNonce(payload.intent.nonce)) { send(res, 409, { error: 'nonce already used' }); return }
@@ -1182,19 +1192,21 @@ const server = http.createServer(async (req, res) => {
   // 5) withdraw escrow back to the owner's wallet (owner-signed, replay-safe)
   if (req.method === 'POST' && url === '/x402/balance/withdraw') {
     readBody(req, async (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       const intent = payload.intent || {}
       const v = balance.verifyWithdraw(intent, payload.signature, facilitator.DOMAIN)
       if (!v.ok) { send(res, 401, { error: v.reason }); return }
       if (!facilitator.claimNonce(intent.nonce)) { send(res, 409, { error: 'nonce already used' }); return }
+      let d
       try {
-        const d = balance.debit(v.buyer, v.amount, 'withdrawal')
+        d = balance.debit(v.buyer, v.amount, 'withdrawal')
         if (!d.ok) { facilitator.releaseNonce(intent.nonce); send(res, 400, { error: d.error }); return }
         const tx = await facilitator.payout({ to: v.buyer, value: v.amount, reason: 'balance withdrawal' })
-        send(res, 200, { ok: true, buyer: v.buyer, amount: ethers.formatUnits(v.amount, 6), tx: tx.txHash, balance: ethers.formatUnits(BigInt(d.balanceAtomic), 6) })
+        send(res, tx.unconfirmed ? 202 : 200, { ok: true, pending: tx.unconfirmed || undefined, buyer: v.buyer, amount: ethers.formatUnits(v.amount, 6), tx: tx.txHash, balance: ethers.formatUnits(BigInt(d.balanceAtomic), 6) })
       } catch (e) {
-        balance.credit(v.buyer, v.amount, 'withdrawal failed, restored')
-        facilitator.releaseNonce(intent.nonce)
+        // payout() throws only before a tx handle exists or on a proven revert => no funds moved => safe to restore.
+        // A broadcast-but-unconfirmed payout returns {unconfirmed:true} instead and keeps the debit + nonce.
+        if (d && d.ok) { balance.credit(v.buyer, v.amount, 'withdrawal failed, restored'); facilitator.releaseNonce(intent.nonce) }
         send(res, 502, { error: 'payout failed: ' + e.message })
       }
     })
@@ -1369,14 +1381,19 @@ const server = http.createServer(async (req, res) => {
   // ---- read-only RPC proxy (whitelisted methods only) ----
   if (req.method === 'POST' && !AUTH_REQUIRED.has(routeTag) && !url.startsWith('/vault') && !url.startsWith('/wallets') && !url.startsWith('/keys') && !url.startsWith('/x402') && !url.startsWith('/facilitator')) {
     readBody(req, (err, payload) => {
-      if (err || !payload) { send(res, 400, { error: 'bad json' }); return }
+      if (err || !payload) { send(res, err?.status || 400, { error: err?.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       const items = Array.isArray(payload) ? payload : [payload]
-      if (!items.every(x => ALLOW.has(x && x.method))) { send(res, 403, { error: 'method not allowed' }); return }
-      const up = https.request(UPSTREAM, { method: 'POST', headers: { 'content-type': 'application/json' } }, ur => {
-        let out = ''
-        ur.on('data', c => out += c)
-        ur.on('end', () => { res.statusCode = ur.statusCode; res.end(out) })
+      if (items.length === 0 || items.length > 10) { send(res, 400, { error: 'batch must contain 1-10 requests' }); return }
+      if (!items.every(x => x && ALLOW.has(x.method))) { send(res, 403, { error: 'method not allowed' }); return }
+      // eth_call: 3rd param is a state-override set (arbitrary code injection / heavy execution) -> forbid; cap calldata
+      if (items.some(x => x.method === 'eth_call' && (!Array.isArray(x.params) || x.params.length > 2 || JSON.stringify(x.params).length > 8192))) { send(res, 400, { error: 'eth_call: at most 2 params (no state overrides), max 8KB' }); return }
+      const MAX_RPC_OUT = 1048576
+      const up = https.request(UPSTREAM, { method: 'POST', timeout: 10000, headers: { 'content-type': 'application/json' } }, ur => {
+        let out = '', over = false
+        ur.on('data', c => { if (over) return; out += c; if (out.length > MAX_RPC_OUT) { over = true; ur.destroy(); res.statusCode = 502; res.end(JSON.stringify({ error: 'upstream response too large' })) } })
+        ur.on('end', () => { if (!over) { res.statusCode = ur.statusCode; res.end(out) } })
       })
+      up.on('timeout', () => up.destroy(new Error('upstream timeout')))
       up.on('error', e => { res.statusCode = 502; res.end(JSON.stringify({ error: String(e.message || e) })) })
       up.end(JSON.stringify(payload))
     })
@@ -1392,7 +1409,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'POST' && url === '/vault/entries') {
     readBody(req, (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       try {
         const rec = vault.put(agent.id, payload.name, payload.value)
         vault.audit('set', payload.name)
@@ -1404,7 +1421,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'DELETE' && url === '/vault/entries') {
     readBody(req, (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       const had = vault.del(agent.id, payload.name)
       vault.audit('delete', payload.name)
       send(res, had ? 200 : 404, had ? { ok: true } : { error: 'not found' })
@@ -1414,7 +1431,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'POST' && url === '/vault/broker') {
     readBody(req, (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       const r = vault.resolve(agent.id, String(payload.text || ''))
       vault.audit('broker', r.used[0] || null, { placeholders: r.used.length })
       send(res, 200, { body: r.body, used: r.used, scrubbed: true })
@@ -1424,7 +1441,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'POST' && url === '/wallets/create') {
     readBody(req, (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       try {
         const rec = wallets.create(agent.id, payload)
         send(res, 201, rec)
@@ -1444,7 +1461,7 @@ const server = http.createServer(async (req, res) => {
     if (!isAdmin(req)) { send(res, 403, { error: 'admin token required. agents can revoke their own key via DELETE /keys/self' }); return }
     if (req.method === 'GET') { res.end(JSON.stringify(keys.list())); return }
     readBody(req, (err, payload) => {
-      if (err) { send(res, 400, { error: 'bad json' }); return }
+      if (err) { send(res, err.status || 400, { error: err.status === 413 ? 'payload too large (max 50KB)' : 'bad json' }); return }
       const had = keys.revoke(payload.id)
       vault.audit('key-revoke', payload.id || null, { by: 'admin' })
       send(res, had ? 200 : 404, had ? { ok: true } : { error: 'not found' })
@@ -1469,9 +1486,15 @@ const server = http.createServer(async (req, res) => {
 // be reachable from within the container itself and port mapping to the
 // host would silently do nothing).
 const HOST = process.env.COVENANT_HOST || '127.0.0.1'
+// slow-body / slowloris protection (Node defaults allow a stalled body for 5 minutes)
+server.requestTimeout = 15000
+server.headersTimeout = 10000
+server.keepAliveTimeout = 5000
 server.listen(PORT, HOST, () => console.log(`covenant-rpc-proxy on ${HOST}:${PORT}`))
 
 // Free nonces whose broadcast tx provably reverted/was dropped (see facilitator.settle). Never touches confirmed/unknown ones.
 const reconcile = () => facilitator.reconcilePending().then(n => n && console.log(`[reconcile] released ${n} dead pending nonce(s)`)).catch(e => console.error('[reconcile]', e.message))
+const sweepPayouts = () => Promise.all([facilitator.retryFailedSplits(), facilitator.retryRefundsDue()]).then(([a, b]) => (a || b) && console.log(`[sweep] retried ${a} seller leg(s), ${b} refund(s)`)).catch(e => console.error('[sweep]', e.message))
+setInterval(sweepPayouts, 5 * 60 * 1000).unref()
 setTimeout(reconcile, 15000).unref()
 setInterval(reconcile, 10 * 60 * 1000).unref()

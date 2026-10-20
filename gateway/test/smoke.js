@@ -114,6 +114,17 @@ async function main() {
     assert.strictEqual(short.status, 400, 'short secrets rejected')
     ok('[audit] /keys global list/revoke is admin-only; short vault secrets rejected')
 
+    // [audit phase 2] HTTP-level hardening
+    const big = await req('POST', '/vault/entries', { name: 'big', value: 'x'.repeat(60000) }, AUTH)
+    assert.strictEqual(big.status, 413, 'oversized body gets an explicit 413, not a dropped connection')
+    const rpcBatch = await req('POST', '/', Array.from({ length: 11 }, () => ({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] })))
+    assert.strictEqual(rpcBatch.status, 400, 'RPC batch capped at 10')
+    const rpcOverride = await req('POST', '/', { jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: '0x' + '11'.repeat(20), data: '0x' }, 'latest', { ['0x' + '22'.repeat(20)]: { code: '0x00' } }] })
+    assert.strictEqual(rpcOverride.status, 400, 'eth_call state overrides rejected')
+    const free = await req('POST', '/x402/apis', { path: '/free-route', price: '0' })
+    assert.strictEqual(free.status, 400, 'zero-price route rejected')
+    ok('[audit p2] 413 on oversize body; RPC batch/state-override limits; zero-price registry rejected')
+
     // vault/wallet isolation: a second agent key must not see agent 1's
     // secrets or wallets — each is scoped to its owning key, not global.
     const mint2 = await req('POST', '/keys', { label: 'smoke2' })
