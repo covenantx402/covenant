@@ -1,11 +1,12 @@
 {
   "name": "@covenantx402/mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server for COVENANT: discover x402 paid APIs, inspect 402 challenges, and (opt-in, capped, confirmed) pay in USDG on Robinhood Chain.",
   "type": "module",
   "main": "src/index.js",
   "bin": {
-    "covenant-mcp": "src/index.js"
+    "covenant-mcp": "src/index.js",
+    "@covenantx402/mcp": "src/index.js"
   },
   "files": [
     "src",
@@ -36,5 +37,10 @@
     "@modelcontextprotocol/sdk": "^1.32.1",
     "ethers": "^6.17.0",
     "zod": "^4.6.7"
+  },
+  "mcpName": "io.github.covenantx402/covenant",
+  "homepage": "https://covenantx402.com",
+  "publishConfig": {
+    "access": "public"
   }
 }
