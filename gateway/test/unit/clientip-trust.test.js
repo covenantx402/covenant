@@ -47,6 +47,7 @@ function startServer(port, extraEnv) {
         COVENANT_RPC_UPSTREAM: process.env.COVENANT_RPC_UPSTREAM || 'https://robinhood-rpc.publicnode.com',
         COVENANT_PORT: String(port),
         COVENANT_SETTLE_KEY: '0x' + '11'.repeat(32),
+        COVENANT_VAULT_KEY: 'unit-test-vault-key-0123456789abcdef',
         COVENANT_DB_PATH: path.join(tmp, 'gateway.db'),
         COVENANT_ROUTES_STORE: path.join(tmp, 'routes.json'),
         ...extraEnv,

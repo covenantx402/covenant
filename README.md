@@ -89,7 +89,9 @@ Cloudflare tunnel) is on the same host.
 | `COVENANT_HOST` | no | Bind address (default `127.0.0.1`). Set to `0.0.0.0` when running in a container or anything else that needs the port reachable from outside localhost. |
 | `COVENANT_SETTLE_KEY` | for settlement | Private key of the facilitator's settlement wallet (the spender agents approve) — same key, reused across all four chains (one wallet, four networks). |
 | `COVENANT_X402_PAYTO` | no | Default recipient address for paid routes |
-| `COVENANT_VAULT_KEY` | recommended | Pepper for vault encryption at rest. Derived from the RPC URL if unset — set your own in production |
+| `COVENANT_VAULT_KEY` | **required** | Secret (≥16 chars) for vault encryption at rest. The gateway refuses to start without it — there is no derived fallback |
+| `COVENANT_ADMIN_TOKEN` | no | Strong token (≥24 chars) enabling admin-only `GET/DELETE /keys`. Unset = global key management disabled |
+| `COVENANT_SOLANA_PAYTO` / `COVENANT_SOLANA_MINT` / `COVENANT_SOLANA_MAX_AMOUNT` | for Solana | Destination token account, accepted mint, optional per-payment cap. Solana verify/settle fail closed without PAYTO |
 | `COVENANT_VAULT_STORE` / `COVENANT_KEYS_STORE` / `COVENANT_WALLETS_STORE` / `COVENANT_SETTLE_STORE` | no | Storage paths (default under `data/`) |
 | `COVENANT_TRUSTED_PROXIES` | no | Comma-separated reverse-proxy IPs trusted to set `X-Forwarded-For` for per-IP rate limiting. Leave empty when reached directly. |
 
@@ -383,7 +385,8 @@ Start with a safe prompt: “Use the Covenant skill. Discover the paid APIs and 
 
 ## Security notes (read before deploying)
 
-- Set `COVENANT_VAULT_KEY` in production; otherwise the vault key derives from the RPC URL.
+- `COVENANT_VAULT_KEY` is mandatory; the gateway will not start without it.
+- Agent keys can only manage themselves (`DELETE /keys/self`). Cross-key list/revoke requires `COVENANT_ADMIN_TOKEN`.
 - `POST /keys` is intentionally open for frictionless onboarding — rate-limit it at your edge if you expose the gateway publicly.
 - `COVENANT_SETTLE_KEY` can pull any USDG amount agents have approved to it. Run it hot with a small float; keep the bulk cold.
 - The RPC proxy (`POST /`) is a strict method whitelist — no state-changing methods pass through.

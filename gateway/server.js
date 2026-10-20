@@ -7,6 +7,7 @@ const x402r = require('./x402-routes')
 const dataProviders = require('./data-providers.js')
 const vault = require('./agent-vault')
 const wallets = require('./wallets')
+const crypto = require('crypto')
 const keys = require('./keys')
 const facilitator = require('./facilitator')
 const marketplace = require('./marketplace')
@@ -41,7 +42,7 @@ if (!UPSTREAM) { console.error('COVENANT_RPC_UPSTREAM missing'); process.exit(1)
 const AUTH_REQUIRED = new Set([
   'POST /vault/entries', 'DELETE /vault/entries', 'GET /vault/entries', 'POST /vault/broker',
   'POST /wallets/create', 'GET /wallets',
-  'GET /keys', 'DELETE /keys', 'DELETE /keys/self',
+  'DELETE /keys/self',
   'GET /analytics/keys',
 ])
 
@@ -354,6 +355,19 @@ function readBody(req, cb) {
   })
 }
 
+const SESSION_CALLS = 100
+const SESSION_TTL_SEC = 3600
+
+function isAdmin(req) {
+  const tok = process.env.COVENANT_ADMIN_TOKEN
+  if (!tok || tok.length < 24) return false // disabled unless a strong token is configured
+  const m = /^Bearer\s+(.+)$/i.exec(String(req.headers.authorization || ''))
+  if (!m) return false
+  const a = crypto.createHash('sha256').update(m[1].trim()).digest()
+  const b = crypto.createHash('sha256').update(tok).digest()
+  return crypto.timingSafeEqual(a, b)
+}
+
 const articleCache = new Map() // url -> {t, json}
 
 const server = http.createServer(async (req, res) => {
@@ -538,11 +552,27 @@ const server = http.createServer(async (req, res) => {
       // on-chain call -> record), not just the DB read.
       if (!batch.tryLockChannel(payload.channelId)) { send(res, 409, { error: 'a claim for this channel is already in progress — retry shortly' }); return }
       try {
-        const nc = batch.netClaimable(payload.channelId)
+        const cid = payload.channelId
+        // Resolve a previously broadcast claim BEFORE considering a new one (no double-claim on timeout/crash).
+        const pend = batch.getClaimPending(cid)
+        if (pend) {
+          const r = await facilitator.inspectTx(pend.chainId, pend.txHash, pend.t)
+          if (r.state === 'confirmed') {
+            batch.recordClaim(cid, pend.txHash, !!pend.close, pend.totalValue)
+            send(res, 200, { success: true, resolvedPending: true, transaction: pend.txHash, channelId: cid, totalClaimed: pend.totalValue }); return
+          }
+          if (r.state === 'unknown') { send(res, 409, { error: 'a previous claim tx is still pending confirmation', transaction: pend.txHash }); return }
+          batch.clearClaimPending(cid) // reverted / dropped: no funds moved, safe to claim again
+        }
+        const nc = batch.netClaimable(cid)
         if (!nc.ok) { send(res, 400, { error: nc.reason }); return }
-        const result = await facilitator.claimChannel({ payer: nc.channel.payer, payTo: nc.channel.payTo, netValue: nc.netValue, chainId: nc.channel.chainId })
-        if (result.success) batch.recordClaim(payload.channelId, result.transaction, !!payload.close)
-        send(res, result.success ? 200 : 400, result.success ? { ...result, channelId: payload.channelId, totalClaimed: nc.totalValue } : { error: result.errorReason })
+        const result = await facilitator.claimChannel({
+          payer: nc.channel.payer, payTo: nc.channel.payTo, netValue: nc.netValue, chainId: nc.channel.chainId,
+          onBroadcast: (txHash) => batch.setClaimPending(cid, { txHash, netValue: nc.netValue, totalValue: nc.totalValue, close: !!payload.close, t: Date.now() }),
+        })
+        if (result.success) batch.recordClaim(cid, result.transaction, !!payload.close, nc.totalValue)
+        else if (result.reverted) batch.clearClaimPending(cid)
+        send(res, result.success ? 200 : (result.pending ? 202 : 400), result.success ? { ...result, channelId: cid, totalClaimed: nc.totalValue } : { error: result.errorReason, pending: result.pending || undefined, transaction: result.transaction })
       } finally {
         batch.unlockChannel(payload.channelId)
       }
@@ -808,7 +838,7 @@ const server = http.createServer(async (req, res) => {
         network: `eip155:${chainId}`,
         maxAmountRequired: priceAtomic,
         resource: 'session',
-        description: `COVENANT session — ${samplePriceUsd} ${chain.usdcSymbol} for 100 calls / 1h on ${chain.name} (set extra.calls/ttlSec to customize)`,
+        description: `COVENANT session — ${samplePriceUsd} ${chain.usdcSymbol} for 100 calls / 1h on ${chain.name}`,
         mimeType: 'application/json',
         payTo,
         maxTimeoutSeconds: 60,
@@ -889,25 +919,25 @@ const server = http.createServer(async (req, res) => {
         let out = v
         if (v.success) {
           reputation.record(v.payer, {
-            valueFormatted: (Number(payload.intent?.value || 0) / (10 ** facilitator.chains.getChain(chainId).decimals)).toFixed(6),
+            valueFormatted: (Number(v.settledValue ?? payload.intent?.value ?? 0) / (10 ** facilitator.chains.getChain(chainId).decimals)).toFixed(6),
             resource: payload.intent?.resource,
             txHash: v.transaction,
           })
-          const extra = payload.extra || {}
-          if (String(payload.intent?.resource) === 'session' || extra.session) {
+          if (String(payload.intent?.resource) === 'session') { // never via client-supplied extra.session: that opened 100-call sessions on cheap per-call payments
             const s = sessions.open({
               payer: v.payer,
               payTo: payload.intent?.to,
               value: payload.intent?.value,
-              calls: extra.calls,
-              ttlSec: extra.ttlSec,
+              // fixed server-side: the 0.01 USDG price buys exactly this, never client-chosen (audit 2026-10)
+              calls: SESSION_CALLS,
+              ttlSec: SESSION_TTL_SEC,
               txHash: v.transaction,
               chainId,
             })
             out = { ...v, session: { id: s.sessionId, callsMax: s.calls.max, expiresAt: s.expiresAt } }
           }
         }
-        send(res, 200, out)
+        send(res, v.pending ? 202 : 200, out)
       })
     })
     return
@@ -971,13 +1001,6 @@ const server = http.createServer(async (req, res) => {
         active24h: active,
         hits: totalHits,
       },
-      // Top key by usage — cukup 5, sisanya tidak perlu dikirim ke UI.
-      top: all.sort((a, b) => b.hits - a.hits).slice(0, 5).map(k => ({
-        label: k.label,
-        prefix: k.prefix,
-        hits: k.hits,
-        lastUsed: k.lastUsed,
-      })),
     })
     return
   }
@@ -1415,16 +1438,15 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  if (req.method === 'GET' && url === '/keys') {
-    res.end(JSON.stringify(keys.list()))
-    return
-  }
-
-  if (req.method === 'DELETE' && url === '/keys') {
+  // Global key management is ADMIN-only (COVENANT_ADMIN_TOKEN). Ordinary agent keys must never be
+  // able to list or revoke other tenants' keys (audit 2026-10, Critical). Agents use DELETE /keys/self.
+  if ((req.method === 'GET' || req.method === 'DELETE') && url === '/keys') {
+    if (!isAdmin(req)) { send(res, 403, { error: 'admin token required. agents can revoke their own key via DELETE /keys/self' }); return }
+    if (req.method === 'GET') { res.end(JSON.stringify(keys.list())); return }
     readBody(req, (err, payload) => {
       if (err) { send(res, 400, { error: 'bad json' }); return }
       const had = keys.revoke(payload.id)
-      vault.audit('key-revoke', payload.id || null)
+      vault.audit('key-revoke', payload.id || null, { by: 'admin' })
       send(res, had ? 200 : 404, had ? { ok: true } : { error: 'not found' })
     })
     return
@@ -1448,3 +1470,8 @@ const server = http.createServer(async (req, res) => {
 // host would silently do nothing).
 const HOST = process.env.COVENANT_HOST || '127.0.0.1'
 server.listen(PORT, HOST, () => console.log(`covenant-rpc-proxy on ${HOST}:${PORT}`))
+
+// Free nonces whose broadcast tx provably reverted/was dropped (see facilitator.settle). Never touches confirmed/unknown ones.
+const reconcile = () => facilitator.reconcilePending().then(n => n && console.log(`[reconcile] released ${n} dead pending nonce(s)`)).catch(e => console.error('[reconcile]', e.message))
+setTimeout(reconcile, 15000).unref()
+setInterval(reconcile, 10 * 60 * 1000).unref()
