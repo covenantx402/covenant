@@ -3,6 +3,7 @@ import assert from 'node:assert'
 import fs from 'node:fs'
 import os from 'node:os'
 import { spawn } from 'node:child_process'
+import http from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { loadConfig, createCore, USDG } from '../src/core.js'
@@ -23,7 +24,7 @@ const mockFetch = (handlers, seen = []) => async (url, init = {}) => {
   const out = h ? await h(init) : { status: 404, body: { error: 'not found' } }
   return { status: out.status, headers: new Headers(), text: async () => JSON.stringify(out.body) }
 }
-const cfg = (o = {}) => loadConfig({ COVENANT_GATEWAY: GW, ...o })
+const cfg = (o = {}) => loadConfig({ COVENANT_GATEWAY: GW, COVENANT_FACILITATOR: SPENDER, ...o })
 
 // 1. config safety
 {
@@ -173,6 +174,59 @@ const cfg = (o = {}) => loadConfig({ COVENANT_GATEWAY: GW, ...o })
   const c4 = createCore({ ...cfg(), agentKeyFile: link, agentKey: null }, { fetchImpl: async () => resp(201, { id: 'k', label: 'l', prefix: 'p', key: AGENT }) })
   await assert.rejects(c4.registerAgent({ confirm: true }), /symlink/); assert.strictEqual(fs.readFileSync(real, 'utf8'), 'x', 'the symlink target must not be overwritten')
   ok('hostile gateway: no redirects, strict amounts, malformed shapes, hostile wallet address/filename, injected error text, symlinked key file')
+}
+
+// 8c. review round 2: concurrency, pinned spender, RPC leak, pending accounting, response size, key validation
+{
+  const resp = (st, b, headers = {}) => ({ status: st, headers: new Headers(headers), text: async () => JSON.stringify(b) })
+  // pinned spender: a gateway that swaps payTo/spender to its own address is refused even though they match each other
+  const EVIL = '0x' + 'ee'.repeat(20)
+  const pinned = createCore(loadConfig({ COVENANT_GATEWAY: GW, COVENANT_WALLET_KEY: KEY }), { fetchImpl: async () => resp(402, challenge({ payTo: EVIL, extra: { spender: EVIL } })) })
+  await assert.rejects(pinned.pay({ route: 'alerts', maxUsdg: 1, confirm: true }), /pinned COVENANT facilitator/)
+  assert.strictEqual(loadConfig({}).facilitator, '0xA59b92F48E2525C364F7F54663b69da68Cd26529')
+  assert.throws(() => loadConfig({ COVENANT_FACILITATOR: 'nope' }), /0x address/)
+
+  // concurrency: two parallel confirmed payments must never both pass the budget check
+  const { ethers } = await import('ethers')
+  const rpcUrl = await new Promise((resolve) => { // minimal JSON-RPC stub so the wallet path runs fully offline
+    const srv = http.createServer((q, r) => { let b = ''; q.on('data', (d) => (b += d)); q.on('end', () => { const j = JSON.parse(b); const one = (m) => { const R = (result) => ({ jsonrpc: '2.0', id: m.id, result }); switch (m.method) {
+      case 'eth_chainId': return R('0x1237'); case 'net_version': return R('4663'); case 'eth_blockNumber': return R('0x10'); case 'eth_getBalance': return R('0xde0b6b3a7640000')
+      case 'eth_call': return R('0x' + (10n ** 18n).toString(16).padStart(64, '0')); case 'eth_getTransactionCount': return R('0x0'); case 'eth_gasPrice': return R('0x5f5e100'); case 'eth_maxPriorityFeePerGas': return R('0x5f5e100')
+      case 'eth_getBlockByNumber': return R({ number: '0x10', hash: '0x' + '01'.repeat(32), baseFeePerGas: '0x5f5e100', timestamp: '0x1', transactions: [] }); default: return R('0x0') } }
+      r.setHeader('content-type', 'application/json'); r.end(JSON.stringify(Array.isArray(j) ? j.map(one) : one(j))) }) })
+    srv.listen(0, '127.0.0.1', () => { global.__rpcSrv = srv; resolve(`http://127.0.0.1:${srv.address().port}`) }) })
+  let settles = 0
+  const gw = async (url, init = {}) => { const p = String(url).replace(GW, ''); if (p === '/x402/api/alerts') return resp(402, challenge({ maxAmountRequired: '50000' }))
+    if (p === '/facilitator/settle') { settles++; await new Promise((r) => setTimeout(r, 60)); return resp(200, { success: true, transaction: '0x' + 'ab'.repeat(32), payment: 'x' }) } return resp(404, {}) }
+  const mk = (extra = {}) => createCore(cfg({ COVENANT_WALLET_KEY: KEY, COVENANT_RPC_URL: rpcUrl, COVENANT_MAX_PAYMENT_USDG: '0.05', COVENANT_SESSION_BUDGET_USDG: '0.05', ...extra }), { fetchImpl: gw })
+  const c = mk()
+  const results = await Promise.allSettled([c.pay({ route: 'alerts', maxUsdg: 1, confirm: true }), c.pay({ route: 'alerts', maxUsdg: 1, confirm: true })])
+  assert.strictEqual(results.filter((x) => x.status === 'fulfilled').length, 1, 'exactly one of two parallel payments may succeed against a one-payment budget')
+  assert.strictEqual(settles, 1, 'only one settle call may be made'); assert.ok(c._state().spent <= 0.05 + 1e-9)
+
+  // pending / failed settle still counts against the budget (a signed intent may settle later) and says NOT to pay again
+  const pend = createCore(cfg({ COVENANT_WALLET_KEY: KEY, COVENANT_RPC_URL: rpcUrl, COVENANT_SESSION_BUDGET_USDG: '0.05', COVENANT_MAX_PAYMENT_USDG: '0.05' }), { fetchImpl: async (u, i = {}) => { const p = String(u).replace(GW, ''); if (p === '/x402/api/alerts') return resp(402, challenge({ maxAmountRequired: '50000' })); if (p === '/facilitator/settle') return resp(200, { success: false, pending: false, errorReason: 'nope' }); return resp(404, {}) } })
+  await assert.rejects(pend.pay({ route: 'alerts', maxUsdg: 1, confirm: true }), /stays counted/)
+  assert.ok(pend._state().spent >= 0.05 - 1e-9, 'failed settle must remain reserved')
+  await assert.rejects(pend.pay({ route: 'alerts', maxUsdg: 1, confirm: true }), /session budget/)
+
+  // RPC endpoint (often carries an API key) must never reach the model through a wallet error
+  const SECRET_RPC = 'http://127.0.0.1:1/v2/SECRETRPCAPIKEY123'
+  const leaky = createCore(cfg({ COVENANT_WALLET_KEY: KEY, COVENANT_RPC_URL: SECRET_RPC }), { fetchImpl: gw })
+  try { await leaky.pay({ route: 'alerts', maxUsdg: 1, confirm: true }) } catch (e) { assert.ok(!/SECRETRPCAPIKEY123|127\.0\.0\.1:1/.test(e.message), 'rpc url must not leak: ' + e.message) }
+  global.__rpcSrv.close()
+
+  // oversized gateway response is refused, not buffered
+  const big = createCore(cfg(), { fetchImpl: async () => ({ status: 200, headers: new Headers({ 'content-length': String(50_000_000) }), text: async () => 'x' }) })
+  await assert.rejects(big.listApis(), /too large/)
+  // registerAgent refuses a malformed key from the gateway and stores nothing
+  const kf = path.join(tmp, 'bad.key')
+  const bad = createCore({ ...cfg(), agentKeyFile: kf, agentKey: null }, { fetchImpl: async () => resp(201, { id: 'k', label: 'l', prefix: 'p', key: 'not-a-key' }) })
+  await assert.rejects(bad.registerAgent({ confirm: true }), /invalid agent key/); assert.ok(!fs.existsSync(kf))
+  // vault broker: a local COVENANT_VAULT_SRC_* value is scrubbed even if the gateway forgot to
+  const vb = createCore(cfg({ COVENANT_AGENT_KEY: AGENT, COVENANT_VAULT_SRC_X: 'topsecret-value-123' }), { fetchImpl: async () => resp(200, { body: 'echo topsecret-value-123', used: ['x'], scrubbed: true }) })
+  assert.ok(!(await vb.vaultBroker('{{x}}')).text.includes('topsecret'))
+  ok('review round 2: pinned facilitator, serialized payments, reserve-before-sign, RPC URL never leaks, size cap, key validation, local scrub')
 }
 
 // 9. real MCP protocol over stdio

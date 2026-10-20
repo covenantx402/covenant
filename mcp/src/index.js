@@ -6,7 +6,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { loadConfig, createCore } from './core.js'
 
-export const VERSION = '0.2.1'
+export const VERSION = '0.2.2'
 const ADDR = z.string().regex(/^0x[0-9a-fA-F]{40}$/)
 const ROUTE = z.string().min(1).max(40).describe('route slug, e.g. "alerts" (not a URL)')
 const NAME = z.string().regex(/^[a-zA-Z0-9_.-]{1,64}$/).describe('vault entry name, 1-64 chars of [A-Za-z0-9_.-]')
@@ -26,7 +26,12 @@ export function buildServer(cfg, core = createCore(cfg)) {
     instructions: 'COVENANT: x402 paid APIs, a credential vault and agent wallets on Robinhood Chain. Start with covenant_status and covenant_list_apis. Never pay or change state without showing the user the dry-run plan and getting explicit approval. Read the covenant://safety resource for the rules.',
   })
   const ok = (obj) => ({ content: [{ type: 'text', text: JSON.stringify(obj, null, 2) }] })
-  const fail = (e) => ({ isError: true, content: [{ type: 'text', text: `Error: ${String(e?.message || e)}` }] })
+  const redact = (t) => {
+    let out = String(t)
+    for (const secret of [cfg.walletKey, cfg.agentKey, cfg.rpc]) if (secret && String(secret).length >= 8) out = out.split(String(secret)).join('[redacted]')
+    return out.replace(/cvn_[0-9a-f]{48}/g, 'cvn_[redacted]').replace(/https?:\/\/[^\s"')]+/g, (u) => (u.startsWith(cfg.gateway) ? u : '[url]'))
+  }
+  const fail = (e) => ({ isError: true, content: [{ type: 'text', text: `Error: ${redact(e?.message || e)}` }] })
   const wrap = (fn) => async (args) => { try { return ok(await fn(args || {})) } catch (e) { return fail(e) } }
   const RO = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }

@@ -15,6 +15,8 @@ import path from 'node:path'
 export const CHAIN_ID = 4663
 export const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'
 export const EXPLORER = 'https://robinhoodchain.blockscout.com'
+// Known COVENANT facilitator/spender on Robinhood Chain. Pinned so a compromised gateway cannot swap in its own address.
+export const FACILITATOR = '0xA59b92F48E2525C364F7F54663b69da68Cd26529'
 const DECIMALS = 6
 const SLUG = /^[a-z0-9-]{1,32}$/
 const ADDR = /^0x[0-9a-fA-F]{40}$/
@@ -30,6 +32,14 @@ const TYPES = {
     { name: 'validAfter', type: 'uint256' }, { name: 'validBefore', type: 'uint256' },
     { name: 'nonce', type: 'bytes32' }, { name: 'resource', type: 'string' },
   ],
+}
+
+const MAX_BODY = 1_000_000
+async function readLimited(r) {
+  if (!r.body?.getReader) { const t = await r.text(); if (t.length > MAX_BODY) throw new Error('gateway response too large; refusing to read it'); return t }
+  const reader = r.body.getReader(); const dec = new TextDecoder(); let out = '', n = 0
+  for (;;) { const { done, value } = await reader.read(); if (done) break; n += value.length; if (n > MAX_BODY) { try { await reader.cancel() } catch {} throw new Error('gateway response too large; refusing to read it') } out += dec.decode(value, { stream: true }) }
+  return out + dec.decode()
 }
 
 function readSecretFile(p, label) {
@@ -54,11 +64,14 @@ export function loadConfig(env = process.env) {
   else if (env.COVENANT_AGENT_KEY) agentKey = String(env.COVENANT_AGENT_KEY).trim()
   if (agentKey && !/^cvn_[0-9a-f]{48}$/.test(agentKey)) throw new Error('agent key is not a valid cvn_ key')
 
+  const facilitator = String(env.COVENANT_FACILITATOR || FACILITATOR)
+  if (!/^0x[0-9a-fA-F]{40}$/.test(facilitator)) throw new Error('COVENANT_FACILITATOR must be a 0x address')
   const num = (v, d) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : d }
   return {
     gateway,
     rpc: env.COVENANT_RPC_URL || 'https://robinhood-rpc.publicnode.com',
     walletKey,
+    facilitator,
     agentKey,
     agentKeyFile,
     walletExportDir: env.COVENANT_WALLET_EXPORT_DIR || null, // enables covenant_wallet_create; keys are written here, never returned
@@ -69,7 +82,7 @@ export function loadConfig(env = process.env) {
 }
 
 export function createCore(cfg, { fetchImpl = fetch } = {}) {
-  const UA = { 'user-agent': 'covenant-mcp/0.2.1', accept: 'application/json' }
+  const UA = { 'user-agent': 'covenant-mcp/0.2.2', accept: 'application/json' }
   let spent = 0
   let busy = false
   let agentKey = cfg.agentKey || null
@@ -83,7 +96,9 @@ export function createCore(cfg, { fetchImpl = fetch } = {}) {
       headers.authorization = `Bearer ${agentKey}`
     }
     const r = await fetchImpl(cfg.gateway + path_, { ...init, headers, redirect: 'error', signal: AbortSignal.timeout(20000) })
-    const text = await r.text()
+    const cl = Number(r.headers?.get?.('content-length') || 0)
+    if (cl > MAX_BODY) throw new Error('gateway response too large; refusing to read it')
+    const text = await readLimited(r)
     let body; try { body = JSON.parse(text) } catch { body = text }
     return { status: r.status, body }
   }
@@ -103,6 +118,12 @@ export function createCore(cfg, { fetchImpl = fetch } = {}) {
     const sv = typeof v === 'string' || typeof v === 'number' ? String(v) : ''
     if (!/^[1-9][0-9]{0,24}$/.test(sv)) throw new Error('refusing: the gateway returned an invalid payment amount')
     return BigInt(sv)
+  }
+  // Wallet/ethers errors can embed the RPC URL (often with an API key) and request payloads: never show them verbatim.
+  const rpcSafe = (e) => {
+    const msg = String(e?.message || e)
+    if (/^(refusing|session budget|price |wallet |another payment|settlement did not|maxUsdg|no exact|gateway)/.test(msg)) return e
+    return new Error(`wallet/rpc error${e?.code ? ` (${String(e.code).slice(0, 40)})` : ''}; details withheld to avoid leaking the RPC endpoint`)
   }
   const usd = (atomic) => Number(atomicOf(atomic)) / 10 ** DECIMALS
   const optionsOf = (body) => (Array.isArray(body?.accepts) ? body.accepts.filter((x) => x && typeof x === 'object') : [])
@@ -146,6 +167,7 @@ export function createCore(cfg, { fetchImpl = fetch } = {}) {
     }
   }
   const reputation = async (address) => need(await getJson(`/reputation/${addr(address)}`), 'reputation')
+  const explorerSafe = (tx) => { try { return explorerLink(tx) } catch { return null } }
   function explorerLink(tx) { if (!TX.test(String(tx || ''))) throw new Error('tx must be a 0x… 32-byte hash'); return `${EXPLORER}/tx/${tx}` }
 
   async function stats() {
@@ -175,6 +197,7 @@ export function createCore(cfg, { fetchImpl = fetch } = {}) {
     if (agentKey) return { registered: false, note: 'an agent key is already loaded for this server; nothing to do' }
     if (!confirm) return { registered: false, note: 'DRY RUN. This would mint a new agent API key on the gateway. Call again with confirm:true after the user approves.' }
     const b = need(await postJson('/keys', { label: String(label || 'mcp-agent').slice(0, 40) }), 'register')
+    if (!/^cvn_[0-9a-f]{48}$/.test(String(b.key || ''))) throw new Error('gateway returned an invalid agent key; nothing was stored')
     agentKey = b.key
     let persisted = false
     if (cfg.agentKeyFile) {
@@ -221,7 +244,9 @@ export function createCore(cfg, { fetchImpl = fetch } = {}) {
     const t = String(text ?? '')
     if (!t.length || t.length > 20000) throw new Error('text must be 1-20000 characters')
     const b = need(await postJson('/vault/broker', { text: t }, { auth: true }), 'vault broker')
-    return { text: b.body, placeholdersResolved: b.used, scrubbed: b.scrubbed === true, note: 'secrets were substituted server-side and scrubbed from this output' }
+    let out = String(b.body ?? '')
+    for (const [k, v] of Object.entries(cfg.env || {})) if (/^COVENANT_VAULT_SRC_/.test(k) && v && String(v).length >= 4) out = out.split(String(v)).join('[REDACTED:local]')
+    return { text: out, placeholdersResolved: Array.isArray(b.used) ? b.used.slice(0, 50) : [], scrubbed: b.scrubbed === true, note: 'secrets were substituted server-side and scrubbed from this output' }
   }
 
   // ================================================================ WALLETS (export to file, never to the model)
@@ -255,6 +280,7 @@ export function createCore(cfg, { fetchImpl = fetch } = {}) {
     if (String(req.asset).toLowerCase() !== USDG.toLowerCase()) throw new Error('refusing: payment asset is not the known USDG contract')
     const spender = req.extra?.spender
     if (!spender || !ADDR.test(spender) || String(req.payTo).toLowerCase() !== String(spender).toLowerCase()) throw new Error('refusing: payTo does not match the facilitator spender')
+    if (String(spender).toLowerCase() !== cfg.facilitator.toLowerCase()) throw new Error('refusing: the gateway asked to pay an address that is not the pinned COVENANT facilitator (set COVENANT_FACILITATOR if it legitimately changed)')
     if (!resourceCheck(String(req.resource || ''))) throw new Error('refusing: resource is outside the configured gateway')
     const price = usd(req.maxAmountRequired)
     if (!(price > 0)) throw new Error('refusing: payment amount must be greater than zero')
@@ -262,6 +288,10 @@ export function createCore(cfg, { fetchImpl = fetch } = {}) {
     if (price > cfg.maxPaymentUsdg) throw new Error(`price ${price} USDG exceeds the server's per-payment cap ${cfg.maxPaymentUsdg} (COVENANT_MAX_PAYMENT_USDG)`)
     if (spent + price > cfg.sessionBudgetUsdg + 1e-9) throw new Error(`session budget ${cfg.sessionBudgetUsdg} USDG would be exceeded (already spent ${spent.toFixed(6)})`)
 
+    // Confirmed payments are serialized: take the lock synchronously, BEFORE any await, so two parallel confirmed
+    // calls can never both pass the budget check against a stale `spent`.
+    if (confirm) { if (busy) throw new Error('another payment is already in progress'); busy = true }
+    try {
     const { ethers, provider, signer } = await wallet()
     const usdg = new ethers.Contract(USDG, ['function balanceOf(address) view returns (uint256)', 'function allowance(address,address) view returns (uint256)', 'function approve(address,uint256) returns (bool)'], signer)
     const needAtomic = atomicOf(req.maxAmountRequired)
@@ -276,15 +306,17 @@ export function createCore(cfg, { fetchImpl = fetch } = {}) {
     if (!confirm) return { executed: false, note: 'DRY RUN. Nothing was signed or sent. Call again with confirm:true to pay.', plan }
     if (balanceAtomic != null && balanceAtomic < needAtomic) throw new Error('wallet USDG balance is lower than the price')
     if (native != null && native === 0n) throw new Error('wallet has no native gas for the one-time approval')
-    if (busy) throw new Error('another payment is already in progress')
-    busy = true
-    try {
+    if (spent + price > cfg.sessionBudgetUsdg + 1e-9) throw new Error(`session budget ${cfg.sessionBudgetUsdg} USDG would be exceeded (already spent ${spent.toFixed(6)})`)
+    {
       if (allowance == null || allowance < needAtomic) {
         const tx = await usdg.approve(spender, needAtomic, { maxFeePerGas: MIN_GAS * 2n, maxPriorityFeePerGas: MIN_GAS, gasLimit: 80000n })
         await tx.wait()
       }
+      // Reserve the price BEFORE signing. A signed intent may still settle later (pending, gateway retry), so every
+      // attempt that reaches signing counts against the budget. It is never refunded automatically: over-counting is the safe direction.
+      spent += price
       const now = Math.floor(Date.now() / 1000)
-      const intent = { from: signer.address, to: req.payTo, value: req.maxAmountRequired, validAfter: String(now - 10), validBefore: String(now + 300), nonce: ethers.hexlify(ethers.randomBytes(32)), resource: req.resource }
+      const intent = { from: signer.address, to: req.payTo, value: req.maxAmountRequired, validAfter: String(now - 10), validBefore: String(now + 120), nonce: ethers.hexlify(ethers.randomBytes(32)), resource: req.resource }
       const signature = await signer.signTypedData({ name: 'COVENANT', version: '1', chainId: CHAIN_ID, verifyingContract: USDG }, TYPES, intent)
       // One signed intent settles at most once on the gateway, so re-sending the SAME intent is always safe.
       let settle
@@ -296,11 +328,16 @@ export function createCore(cfg, { fetchImpl = fetch } = {}) {
         if (!retry || i === 5) break
         await sleep(6000)
       }
-      if (!settle?.success) throw new Error(`settlement failed: ${settle?.errorReason || 'unknown'}${settle?.pending ? ` (pending tx ${settle.transaction}; re-run to resolve)` : ''}`)
-      spent += price
-      ledger.push({ at: new Date().toISOString(), what: label, usdg: price, tx: settle.transaction })
+      if (!settle?.success) {
+        ledger.push({ at: new Date().toISOString(), what: label, usdg: price, tx: settle?.transaction || null, status: settle?.pending ? 'pending' : 'failed' })
+        throw new Error(`settlement did not complete: ${clean(settle?.errorReason || 'unknown')}${settle?.pending ? ` — the transfer is PENDING (tx ${clean(settle.transaction)}). Do NOT pay again: check covenant_receipts or the explorer first. The price stays counted against the budget.` : ' — the price stays counted against the budget for this process.'}`)
+      }
+      ledger.push({ at: new Date().toISOString(), what: label, usdg: price, tx: settle.transaction, status: 'settled' })
       return { executed: true, settle, price }
-    } finally { busy = false }
+    }
+    } catch (e) {
+      throw rpcSafe(e)
+    } finally { if (confirm) busy = false }
   }
 
   async function pay({ route, maxUsdg, confirm = false }) {
@@ -314,7 +351,7 @@ export function createCore(cfg, { fetchImpl = fetch } = {}) {
     if (!out.executed) return out
     const paid = await http(`/x402/api/${slug}`, { headers: { 'x-payment': out.settle.payment } })
     return {
-      executed: true, settled: true, transaction: out.settle.transaction, explorer: explorerLink(out.settle.transaction), paidUsdg: out.price,
+      executed: true, settled: true, transaction: out.settle.transaction, explorer: explorerSafe(out.settle.transaction), paidUsdg: out.price,
       sessionSpentUsdg: Number(spent.toFixed(6)), delivery: { httpStatus: paid.status, data: paid.status === 200 ? paid.body : undefined, note: paid.status === 200 ? undefined : 'payment settled but delivery did not return 200' },
     }
   }
@@ -329,7 +366,7 @@ export function createCore(cfg, { fetchImpl = fetch } = {}) {
     const out = await settleOption({ req, label: 'prepaid session', maxUsdg, confirm, resourceCheck: (r) => r === 'session' })
     if (!out.executed) return out
     const s = out.settle.session
-    return { executed: true, settled: true, transaction: out.settle.transaction, explorer: explorerLink(out.settle.transaction), paidUsdg: out.price, sessionId: s?.id, callsMax: s?.callsMax, expiresAt: s?.expiresAt ? new Date(s.expiresAt).toISOString() : null, sessionSpentUsdg: Number(spent.toFixed(6)) }
+    return { executed: true, settled: true, transaction: out.settle.transaction, explorer: explorerSafe(out.settle.transaction), paidUsdg: out.price, sessionId: s?.id, callsMax: s?.callsMax, expiresAt: s?.expiresAt ? new Date(s.expiresAt).toISOString() : null, sessionSpentUsdg: Number(spent.toFixed(6)) }
   }
   async function sessionRedeem({ sessionId, confirm = false }) {
     if (!SESSION_ID.test(String(sessionId || ''))) throw new Error('sessionId looks invalid')
