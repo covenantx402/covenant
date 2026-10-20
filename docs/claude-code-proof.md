@@ -49,11 +49,11 @@ curl -si https://gateway.covenantx402.com/x402/premium
 curl -sS https://gateway.covenantx402.com/x402/stats
 ```
 
-The unpaid `/x402/premium` response must be `402`; do not stage a success response.
+The unpaid `/x402/premium` response must be `402`; do not stage a success response. Note: `/x402/premium` is a sample *challenge* for discovery only — it never returns paid content, even with a valid receipt. Prove delivery on a real route such as `/x402/api/alerts`.
 
 ## 3. Optional: approved fresh paid call
 
-Only after the wallet owner approves the spend, run the reviewed payment client with a disposable USDG-funded wallet. Capture:
+Only after the wallet owner approves the spend, run the reviewed payment client (`examples/pay.js`, which pays the real paid route `/x402/api/alerts` by default) with a disposable USDG-funded wallet. Capture:
 
 ```text
 402 challenge

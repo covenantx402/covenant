@@ -311,7 +311,7 @@ curl -X POST https://gateway.covenantx402.com/x402/solana/settle -d '{"transacti
 
 **Paid (402 until settled):**
 
-- `GET /x402/api/:slug`, `GET /x402/premium` — pay-per-call or session (`?chain=<id>` to target a non-default chain)
+- `GET /x402/api/:slug` — pay-per-call or session; `GET /x402/premium` — sample 402 challenge for discovery/playground (never returns paid content) (`?chain=<id>` to target a non-default chain)
 - `POST /facilitator/verify` — verify a signed intent without settling
 - `POST /facilitator/settle` — settle on-chain (per-call or session, any supported chain)
 - `POST /session/redeem` — spend one session call, zero on-chain interaction
@@ -359,7 +359,7 @@ Full usage: [`kit/README.md`](kit/README.md).
 ## Examples
 
 - `examples/paid-api.js` — register a paid route on a running gateway (`node examples/paid-api.js /alerts 0.01 0xYourAddress`)
-- `examples/pay.js` — agent client: fetch 402 → sign intent → settle → receive resource
+- `examples/pay.js` — agent client: fetch 402 → approve → sign intent → settle → replay the receipt → receive the paid response (default route `/x402/api/alerts`, override with `COVENANT_RESOURCE`). Safe to re-run: a signed intent is settled at most once, and transient RPC errors are retried
 
 ## Testing
 
