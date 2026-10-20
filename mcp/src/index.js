@@ -6,7 +6,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { loadConfig, createCore } from './core.js'
 
-export const VERSION = '0.2.0'
+export const VERSION = '0.2.1'
 const ADDR = z.string().regex(/^0x[0-9a-fA-F]{40}$/)
 const ROUTE = z.string().min(1).max(40).describe('route slug, e.g. "alerts" (not a URL)')
 const NAME = z.string().regex(/^[a-zA-Z0-9_.-]{1,64}$/).describe('vault entry name, 1-64 chars of [A-Za-z0-9_.-]')
