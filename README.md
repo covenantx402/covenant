@@ -317,7 +317,7 @@ curl -X POST https://gateway.covenantx402.com/x402/solana/settle -d '{"transacti
 - `POST /session/redeem` — spend one session call, zero on-chain interaction
 - `GET /session/:id` — session status
 
-**Agent identity (key-authed via `Authorization: Bearer cvn_...`):**
+**Agent identity (key-authed via `Authorization: Bearer cvn_…`):**
 
 - `POST /keys` — mint an agent API key (shown once)
 - `DELETE /keys/self` — revoke the key making the request (global `GET/DELETE /keys` are admin-only via `COVENANT_ADMIN_TOKEN`)
