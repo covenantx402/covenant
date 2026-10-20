@@ -1,0 +1,24 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "name": "io.github.covenantx402/covenant",
+  "title": "COVENANT",
+  "description": "x402 paid APIs, an encrypted credential vault and agent wallets on Robinhood Chain. Dry-run-first, capped spending.",
+  "version": "0.3.0",
+  "repository": { "url": "https://github.com/covenantx402/covenant", "source": "github", "subfolder": "mcp" },
+  "websiteUrl": "https://covenantx402.com",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@covenantx402/mcp",
+      "version": "0.3.0",
+      "runtimeHint": "npx",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        { "name": "COVENANT_WALLET_KEY_FILE", "description": "Path to a chmod-600 file with a disposable wallet private key. Enables the spending tools. Optional.", "isRequired": false, "isSecret": false },
+        { "name": "COVENANT_MAX_PAYMENT_USDG", "description": "Hard ceiling per payment in USDG (default 0.05).", "isRequired": false },
+        { "name": "COVENANT_SESSION_BUDGET_USDG", "description": "Total this server process may spend in USDG (default 0.10).", "isRequired": false }
+      ]
+    }
+  ],
+  "remotes": [ { "type": "streamable-http", "url": "https://mcp.covenantx402.com/mcp" } ]
+}
