@@ -50,6 +50,7 @@ gateway/   Zero-dependency HTTP gateway: RPC proxy, x402 v1+v2, vault, facilitat
 kit/       TypeScript middleware (@covenantx402/x402-kit) — Express paywall + usage analytics
 examples/  Runnable examples: paywalled API, agent client that pays
 skill/     Agent skill file (SKILL.md) — teach any agent (Claude/Cursor/Hermes) to use COVENANT
+mcp/       MCP server (@covenantx402/mcp) — typed tools for discovery, 402 inspection, receipts and opt-in capped payment
 Dockerfile, docker-compose.yml   Multi-stage build + one-command run (see Quick start below)
 ```
 
@@ -89,7 +90,9 @@ Cloudflare tunnel) is on the same host.
 | `COVENANT_HOST` | no | Bind address (default `127.0.0.1`). Set to `0.0.0.0` when running in a container or anything else that needs the port reachable from outside localhost. |
 | `COVENANT_SETTLE_KEY` | for settlement | Private key of the facilitator's settlement wallet (the spender agents approve) — same key, reused across all four chains (one wallet, four networks). |
 | `COVENANT_X402_PAYTO` | no | Default recipient address for paid routes |
-| `COVENANT_VAULT_KEY` | recommended | Pepper for vault encryption at rest. Derived from the RPC URL if unset — set your own in production |
+| `COVENANT_VAULT_KEY` | **required** | Secret (≥16 chars) for vault encryption at rest. The gateway refuses to start without it — there is no derived fallback |
+| `COVENANT_ADMIN_TOKEN` | no | Strong token (≥24 chars) enabling admin-only `GET/DELETE /keys`. Unset = global key management disabled |
+| `COVENANT_SOLANA_PAYTO` / `COVENANT_SOLANA_MINT` / `COVENANT_SOLANA_MAX_AMOUNT` | for Solana | Destination token account, accepted mint, optional per-payment cap. Solana verify/settle fail closed without PAYTO |
 | `COVENANT_VAULT_STORE` / `COVENANT_KEYS_STORE` / `COVENANT_WALLETS_STORE` / `COVENANT_SETTLE_STORE` | no | Storage paths (default under `data/`) |
 | `COVENANT_TRUSTED_PROXIES` | no | Comma-separated reverse-proxy IPs trusted to set `X-Forwarded-For` for per-IP rate limiting. Leave empty when reached directly. |
 
@@ -124,7 +127,7 @@ None of the four supported chains' stablecoin deployments implement EIP-3009 `tr
 3. Agent POSTs `{ intent, signature, chainId }` to `POST /facilitator/settle`.
 4. Facilitator verifies signature + balance + allowance + authorization window + nonce replay **on that chain**, executes `transferFrom`, returns the tx hash.
 
-Every settlement is replay-guarded by a persisted `(chain_id, nonce)` pair and auditable by tx hash. Set `resource: "session"` instead to open a 100-call / 1h prepaid session in the same settle call — see [`/x402/premium`'s `x-payment-info.protocols[1]`](#why-this-isnt-just-a-402-demo).
+Every settlement is replay-guarded by a persisted `(chain_id, nonce)` pair and auditable by tx hash. Set `resource: "session"` instead to open a 100-call / 1h prepaid session in the same settle call (entitlement is fixed server-side). If the chain confirmation is not yet known, `/facilitator/settle` returns `202 {pending:true, transaction}` — re-send the same request; it resolves against that tx and never double-charges — see [`/x402/premium`'s `x-payment-info.protocols[1]`](#why-this-isnt-just-a-402-demo).
 
 ## Who pays gas, and the per-chain price floor
 
@@ -309,15 +312,16 @@ curl -X POST https://gateway.covenantx402.com/x402/solana/settle -d '{"transacti
 
 **Paid (402 until settled):**
 
-- `GET /x402/api/:slug`, `GET /x402/premium` — pay-per-call or session (`?chain=<id>` to target a non-default chain)
+- `GET /x402/api/:slug` — pay-per-call or session; `GET /x402/premium` — sample 402 challenge for discovery/playground (never returns paid content) (`?chain=<id>` to target a non-default chain)
 - `POST /facilitator/verify` — verify a signed intent without settling
 - `POST /facilitator/settle` — settle on-chain (per-call or session, any supported chain)
 - `POST /session/redeem` — spend one session call, zero on-chain interaction
 - `GET /session/:id` — session status
 
-**Agent identity (key-authed via `Authorization: Bearer cvn_...`):**
+**Agent identity (key-authed via `Authorization: Bearer cvn_…`):**
 
 - `POST /keys` — mint an agent API key (shown once)
+- `DELETE /keys/self` — revoke the key making the request (global `GET/DELETE /keys` are admin-only via `COVENANT_ADMIN_TOKEN`)
 - `POST /vault/entries`, `POST /vault/broker` — store secrets, or run a prompt with secrets injected server-side (**the secret never reaches the agent's context**)
 - `POST /wallets/create` — server-generated agent wallet
 - `GET /analytics/keys` — per-key usage stats
@@ -356,7 +360,7 @@ Full usage: [`kit/README.md`](kit/README.md).
 ## Examples
 
 - `examples/paid-api.js` — register a paid route on a running gateway (`node examples/paid-api.js /alerts 0.01 0xYourAddress`)
-- `examples/pay.js` — agent client: fetch 402 → sign intent → settle → receive resource
+- `examples/pay.js` — agent client: fetch 402 → approve → sign intent → settle → replay the receipt → receive the paid response (default route `/x402/api/alerts`, override with `COVENANT_RESOURCE`). Safe to re-run: a signed intent is settled at most once, and transient RPC errors are retried
 
 ## Testing
 
@@ -365,6 +369,14 @@ cd gateway && npm test     # smoke.js, preflight.js, pay-once.js, pay-onchain.js
 cd kit && npm run build    # tsc -p .
 ```
 CI (`.github/workflows/ci.yml`) runs both on every push/PR to `main`.
+
+## MCP server
+
+[`mcp/`](mcp/README.md) exposes COVENANT as typed MCP tools. Read-only by default; `covenant_pay` exists only when you configure a wallet, and is dry-run-first with server-enforced per-payment and session caps.
+
+```bash
+claude mcp add covenant -- npx -y @covenantx402/mcp
+```
 
 ## Agent skill
 
@@ -383,7 +395,8 @@ Start with a safe prompt: “Use the Covenant skill. Discover the paid APIs and 
 
 ## Security notes (read before deploying)
 
-- Set `COVENANT_VAULT_KEY` in production; otherwise the vault key derives from the RPC URL.
+- `COVENANT_VAULT_KEY` is mandatory; the gateway will not start without it.
+- Agent keys can only manage themselves (`DELETE /keys/self`). Cross-key list/revoke requires `COVENANT_ADMIN_TOKEN`.
 - `POST /keys` is intentionally open for frictionless onboarding — rate-limit it at your edge if you expose the gateway publicly.
 - `COVENANT_SETTLE_KEY` can pull any USDG amount agents have approved to it. Run it hot with a small float; keep the bulk cold.
 - The RPC proxy (`POST /`) is a strict method whitelist — no state-changing methods pass through.

@@ -87,7 +87,7 @@ function run() {
       assert.strictEqual(nc1.netValue, '50000', 'first claim: net = full cumulative (nothing claimed yet)')
 
       // simulate a successful on-chain claim being recorded
-      batch.recordClaim(ch.channelId, '0xdeadbeef', false)
+      batch.recordClaim(ch.channelId, '0xdeadbeef', false, batch.netClaimable(ch.channelId).totalValue)
       const nc2 = batch.netClaimable(ch.channelId)
       assert.strictEqual(nc2.ok, false, 'after claiming everything, nothing new is claimable')
       assert.ok(/nothing new to claim/.test(nc2.reason))

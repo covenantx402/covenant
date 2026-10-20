@@ -142,6 +142,44 @@ function decodeTransaction(base64Transaction) {
  *      token transfer.
  * Returns { ok, reason? }.
  */
+/**
+ * Instruction-level payment binding (audit 2026-10). Before this, verify() ignored payTo/amount/asset,
+ * so anyone could make the facilitator sponsor the fee of ANY SPL transfer. Now the tx must contain
+ * EXACTLY ONE SPL TransferChecked whose mint and destination token account are fixed server-side
+ * (COVENANT_SOLANA_PAYTO is required: fail closed). Caller-supplied payTo/amount/asset can only narrow.
+ * TransferChecked layout: data = [12, amount u64 LE, decimals u8]; accounts = [source, mint, destination, authority].
+ */
+function paymentPolicy() {
+  return {
+    mint: process.env.COVENANT_SOLANA_MINT || NETWORK.usdcMint,
+    payTo: process.env.COVENANT_SOLANA_PAYTO || null, // destination TOKEN account (ATA)
+    maxAmount: process.env.COVENANT_SOLANA_MAX_AMOUNT ? BigInt(process.env.COVENANT_SOLANA_MAX_AMOUNT) : null,
+  }
+}
+function assertPaymentTx(compiledMessage, want = {}) {
+  const pol = paymentPolicy()
+  if (!pol.payTo) return { ok: false, reason: 'Solana settlement recipient not configured (COVENANT_SOLANA_PAYTO) — refusing to sponsor fees for unbound transfers' }
+  const accts = compiledMessage.staticAccounts || []
+  const ixs = compiledMessage.instructions || []
+  if (ixs.length !== 1) return { ok: false, reason: 'payment transaction must contain exactly one instruction (a single SPL TransferChecked)' }
+  const ix = ixs[0]
+  const data = ix.data ? Buffer.from(ix.data) : Buffer.alloc(0)
+  if (data.length !== 10 || data[0] !== 12) return { ok: false, reason: 'instruction is not an SPL TransferChecked' }
+  const idx = ix.accountIndices || []
+  if (idx.length < 4) return { ok: false, reason: 'malformed TransferChecked accounts' }
+  const mint = accts[idx[1]], destination = accts[idx[2]]
+  const amount = data.readBigUInt64LE(1), decimals = data[9]
+  if (mint !== pol.mint) return { ok: false, reason: `transfer mint ${mint} is not the accepted asset` }
+  if (destination !== pol.payTo) return { ok: false, reason: 'transfer destination is not this gateway\'s configured recipient' }
+  if (decimals !== NETWORK.decimals) return { ok: false, reason: `unexpected decimals ${decimals}` }
+  if (amount <= 0n) return { ok: false, reason: 'transfer amount must be > 0' }
+  if (pol.maxAmount != null && amount > pol.maxAmount) return { ok: false, reason: 'transfer amount exceeds the configured maximum' }
+  if (want.asset != null && String(want.asset) !== mint) return { ok: false, reason: 'transfer asset does not match the requested asset' }
+  if (want.payTo != null && String(want.payTo) !== destination) return { ok: false, reason: 'transfer recipient does not match the requested payTo' }
+  if (want.amount != null && BigInt(want.amount) !== amount) return { ok: false, reason: 'transfer amount does not match the requested amount' }
+  return { ok: true, amount: amount.toString() }
+}
+
 function assertSafeTx(compiledMessage, feePayerAddress) {
   const staticAccounts = compiledMessage.staticAccounts || []
   // Address Lookup Tables let a transaction reference additional accounts
@@ -203,6 +241,11 @@ async function verify({ transaction, payTo, amount, asset }) {
   // fee payer; the signature check below alone would have accepted it.
   const safety = assertSafeTx(compiledMessage, feePayerAccount)
   if (!safety.ok) return { ok: false, reason: safety.reason }
+  let wantAmount
+  try { wantAmount = amount }
+  catch { wantAmount = undefined }
+  const pay = assertPaymentTx(compiledMessage, { payTo, amount: wantAmount, asset })
+  if (!pay.ok) return { ok: false, reason: pay.reason }
 
   // The fee payer's signature slot must currently be present-but-EMPTY —
   // @solana/kit represents an unsigned slot as `null` (not 64 zero
@@ -240,6 +283,10 @@ async function settle({ transaction }) {
   const fp = await feePayer()
   if (!fp) return { success: false, errorReason: 'Solana fee payer not configured (COVENANT_SOLANA_FEE_PAYER_KEY missing)' }
 
+  // settle() NEVER co-signs on its own authority: re-run the full verification (fee-payer safety +
+  // payment binding) on the exact bytes about to be signed, so no caller can skip verify().
+  const vr = await verify({ transaction })
+  if (!vr.ok) return { success: false, errorReason: vr.reason }
   let decoded
   try { decoded = decodeTransaction(transaction) }
   catch (e) { return { success: false, errorReason: 'cannot decode transaction: ' + String(e.message || e) } }
@@ -273,4 +320,4 @@ function publicView() {
   }
 }
 
-module.exports = { NETWORK, isConfigured, feePayer, decodeTransaction, verify, settle, publicView, getBase64EncodedWireTransaction }
+module.exports = { assertPaymentTx, NETWORK, isConfigured, feePayer, decodeTransaction, verify, settle, publicView, getBase64EncodedWireTransaction }
