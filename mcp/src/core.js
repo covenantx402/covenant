@@ -82,7 +82,7 @@ export function loadConfig(env = process.env) {
 }
 
 export function createCore(cfg, { fetchImpl = fetch } = {}) {
-  const UA = { 'user-agent': 'covenant-mcp/0.2.2', accept: 'application/json' }
+  const UA = { 'user-agent': 'covenant-mcp/0.3.0', accept: 'application/json' }
   let spent = 0
   let busy = false
   let agentKey = cfg.agentKey || null

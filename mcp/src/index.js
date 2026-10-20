@@ -6,7 +6,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { loadConfig, createCore } from './core.js'
 
-export const VERSION = '0.2.2'
+export const VERSION = '0.3.0'
 const ADDR = z.string().regex(/^0x[0-9a-fA-F]{40}$/)
 const ROUTE = z.string().min(1).max(40).describe('route slug, e.g. "alerts" (not a URL)')
 const NAME = z.string().regex(/^[a-zA-Z0-9_.-]{1,64}$/).describe('vault entry name, 1-64 chars of [A-Za-z0-9_.-]')
@@ -21,7 +21,7 @@ export const SAFETY_TEXT = `COVENANT MCP safety model
 - Secrets never enter your context: the agent API key and wallet keys are kept in files (mode 600), vault values are read from the server's environment, and covenant_vault_broker output is scrubbed.
 - Chain: Robinhood Chain (4663), asset USDG. Other rails listed by the gateway are not settlement-ready; check covenant_status.`
 
-export function buildServer(cfg, core = createCore(cfg)) {
+export function buildServer(cfg, core = createCore(cfg), { remote = false } = {}) {
   const server = new McpServer({ name: 'covenant', version: VERSION }, {
     instructions: 'COVENANT: x402 paid APIs, a credential vault and agent wallets on Robinhood Chain. Start with covenant_status and covenant_list_apis. Never pay or change state without showing the user the dry-run plan and getting explicit approval. Read the covenant://safety resource for the rules.',
   })
@@ -57,6 +57,8 @@ export function buildServer(cfg, core = createCore(cfg)) {
   tool('covenant_vault_status', 'Vault status', 'Aggregate vault counters (entries, brokered calls). Never names or values.', {}, RO, () => core.vaultStatus())
   tool('covenant_spend_summary', 'Spend summary', 'What this MCP server may spend (caps, budget) and what it has spent so far, with receipts.', {}, RO, async () => core.spendSummary())
 
+  // Hosted (remote) mode is strictly discovery + read. Identity, vault, wallet and spending tools are not even registered.
+  if (!remote) {
   // -------------------------------------------------- agent identity
   tool('covenant_register_agent', 'Register this agent', 'Mint an agent API key on the gateway (needed for the vault and wallets). The key is stored server-side (mode-600 file if configured) and is NEVER returned to you. Dry run unless confirm:true.',
     { label: z.string().max(40).optional(), confirm: CONFIRM }, WRITE, (a) => core.registerAgent(a))
@@ -83,6 +85,8 @@ export function buildServer(cfg, core = createCore(cfg)) {
   if (cfg.walletExportDir) {
     tool('covenant_wallet_create', 'Create an agent wallet', 'Create a new agent wallet on Robinhood Chain. The private key and mnemonic are written to a mode-600 file on the server and NOT returned to you. Dry run unless confirm:true.',
       { label: z.string().max(40).optional(), confirm: CONFIRM }, WRITE, (a) => core.walletCreate(a))
+  }
+
   }
 
   // -------------------------------------------------- resources
