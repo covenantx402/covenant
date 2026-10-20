@@ -8,14 +8,15 @@
 const crypto = require('crypto')
 const db = require('./db')
 
-function key() {
-  const raw = process.env.COVENANT_VAULT_KEY || crypto.createHash('sha256')
-    .update(process.env.COVENANT_RPC_UPSTREAM || 'covenant-local').digest()
-  return crypto.createHash('sha256').update(raw).digest()
+// Audit 2026-10: no derived/fallback key. Refuse to start without a real secret
+// (previously derived from COVENANT_RPC_UPSTREAM, which an attacker holding the DB could reproduce).
+const VAULT_SECRET = process.env.COVENANT_VAULT_KEY
+if (!VAULT_SECRET || VAULT_SECRET.length < 16) {
+  throw new Error('[vault] COVENANT_VAULT_KEY is required (>= 16 chars, high entropy). Refusing to start with a derived key.')
 }
-if (!process.env.COVENANT_VAULT_KEY) {
-  console.warn('[vault] COVENANT_VAULT_KEY not set — encryption key derived from COVENANT_RPC_UPSTREAM. Set COVENANT_VAULT_KEY in production (see README Security notes).')
-}
+const VAULT_KEY = crypto.createHash('sha256').update(VAULT_SECRET).digest()
+function key() { return VAULT_KEY }
+const MIN_SECRET_LEN = 4 // shorter values cannot be reliably scrubbed from readbacks
 
 const stmts = {
   put: db.prepare('INSERT INTO vault_entries (owner, name, enc, iv, tag, created_at, hits) VALUES (?,?,?,?,?,?,0) ON CONFLICT(owner, name) DO UPDATE SET enc=excluded.enc, iv=excluded.iv, tag=excluded.tag, created_at=excluded.created_at, hits=0'),
@@ -36,7 +37,7 @@ function requireOwner(owner) {
 function put(owner, name, value) {
   requireOwner(owner)
   if (!/^[a-zA-Z0-9_.-]{1,64}$/.test(name)) throw new Error('name must be 1-64 chars of [A-Za-z0-9_.-]')
-  if (typeof value !== 'string' || value.length === 0 || value.length > 4096) throw new Error('value must be a non-empty string ≤ 4096 chars')
+  if (typeof value !== 'string' || value.length === 0 || value.length < MIN_SECRET_LEN || value.length > 4096) throw new Error(`value must be a string of ${MIN_SECRET_LEN}-4096 chars`)
   const iv = crypto.randomBytes(12)
   const cipher = crypto.createCipheriv('aes-256-gcm', key(), iv)
   const enc = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()])
@@ -63,7 +64,7 @@ function resolve(owner, text) {
   const used = []
   let out = String(text).replace(/\{\{([a-zA-Z0-9_.-]{1,64})\}\}/g, (m, name) => {
     const v = get(owner, name)
-    if (v === null) return m
+    if (v === null || v.length < MIN_SECRET_LEN) return m // legacy short secrets are never substituted (cannot be scrubbed)
     used.push(name)
     return v
   })

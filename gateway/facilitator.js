@@ -73,10 +73,15 @@ const stmts = {
   // since claimPaymentNonce's own exclusivity should prevent two
   // genuine settlements ever reaching this insert for the same nonce.
   nonceInsert: db.prepare(`INSERT INTO nonces (chain_id, nonce, tx_hash, t, from_addr, value, redeemed) VALUES (?,?,?,?,?,?,0)
-    ON CONFLICT(chain_id, nonce) DO UPDATE SET tx_hash = excluded.tx_hash, t = excluded.t, from_addr = excluded.from_addr, value = excluded.value
+    ON CONFLICT(chain_id, nonce) DO UPDATE SET tx_hash = excluded.tx_hash, t = excluded.t, from_addr = excluded.from_addr, value = excluded.value, pending = NULL
     WHERE nonces.tx_hash IS NULL`),
+  // A broadcast-but-unconfirmed transferFrom. While set, the nonce is NEVER released.
+  noncePending: db.prepare('UPDATE nonces SET pending = ? WHERE chain_id = ? AND nonce = ? AND tx_hash IS NULL'),
+  noncePendingAll: db.prepare('SELECT chain_id, nonce, pending FROM nonces WHERE pending IS NOT NULL AND tx_hash IS NULL'),
+  nonceReleasePending: db.prepare('DELETE FROM nonces WHERE chain_id = ? AND nonce = ? AND tx_hash IS NULL AND pending IS NOT NULL'),
   nonceClaim: db.prepare("INSERT INTO nonces (chain_id, nonce, tx_hash, t, from_addr, value, redeemed) VALUES (?,?,NULL,?,NULL,'0',0) ON CONFLICT(chain_id, nonce) DO NOTHING"),
-  nonceRedeem: db.prepare('UPDATE nonces SET redeemed = 1 WHERE chain_id = ? AND nonce = ? AND redeemed = 0'),
+  // tx_hash IS NOT NULL: a placeholder / 'act:' / pending row is not a settled payment and can never be redeemed.
+  nonceRedeem: db.prepare('UPDATE nonces SET redeemed = 1 WHERE chain_id = ? AND nonce = ? AND redeemed = 0 AND tx_hash IS NOT NULL'),
   nonceDelete: db.prepare('DELETE FROM nonces WHERE chain_id = ? AND nonce = ?'),
   settleInsert: db.prepare('INSERT INTO settlements (chain_id, tx_hash, t, payer, pay_to, value, value_formatted, resource, gas_used, pending_splits, splits, splits_cancelled) VALUES (?,?,?,?,?,?,?,?,?,?,?,0)'),
   settleByTx: db.prepare('SELECT * FROM settlements WHERE chain_id = ? AND tx_hash = ?'),
@@ -136,7 +141,7 @@ function releasePaymentNonce(chainId, nonce) {
   // matters if releasePaymentNonce is ever called on a nonce that (by
   // some other path) already has a real settlement recorded; it must
   // not erase that record.
-  db.prepare('DELETE FROM nonces WHERE chain_id = ? AND nonce = ? AND tx_hash IS NULL').run(Number(chainId), nonce)
+  db.prepare('DELETE FROM nonces WHERE chain_id = ? AND nonce = ? AND tx_hash IS NULL AND pending IS NULL').run(Number(chainId), nonce)
 }
 
 // provider()/settlementWallet() are memoized PER CHAIN — verify()/settle()/
@@ -370,6 +375,11 @@ async function settle(intent, signature, splits = null, chainId = DEFAULT_CHAIN_
     }
   }
 
+  // A previous attempt for this nonce may have broadcast a tx whose confirmation we never saw
+  // (RPC timeout). Resolve it by tx hash instead of treating the retry as a new payment.
+  const prior = stmts.nonceGet.get(id, intent.nonce)
+  if (prior && prior.pending && !prior.tx_hash) return resolvePending(id, intent, splits)
+
   const v = await verify(intent, signature, id)
   if (!v.ok) return { success: false, errorReason: v.reason, payer: v.payer || null }
 
@@ -427,54 +437,11 @@ async function settle(intent, signature, splits = null, chainId = DEFAULT_CHAIN_
     return { success: false, errorReason: `cannot read ${c.usdcSymbol} state from ${c.name} — RPC may be busy, retry in a moment`, payer: intent.from }
   }
 
+  let tx
   try {
-    const tx = await token.transferFrom(intent.from, intent.to, settleValue)
-    const receipt = await tx.wait()
-    const rec = {
-      chainId: id,
-      t: Date.now(),
-      payer: intent.from,
-      to: intent.to,
-      value: String(settleValue),
-      valueFormatted: ethers.formatUnits(settleValue, c.decimals),
-      resource: intent.resource || '',
-      txHash: receipt.hash,
-      gasUsed: receipt.gasUsed?.toString?.() || null,
-    }
-    stmts.nonceInsert.run(id, intent.nonce, rec.txHash, rec.t, rec.payer, rec.value)
-    stmts.settleInsert.run(id, rec.txHash, rec.t, rec.payer, rec.to, rec.value, rec.valueFormatted, rec.resource, rec.gasUsed, null, null)
-
-    // Marketplace fee split: the full pull lands on the facilitator wallet
-    // (intent.to). The seller leg is NOT pushed here — it is deferred until
-    // the gateway confirms the buyer actually received the seller's payload
-    // (finalizeSplits after delivery). That way a failed upstream can be
-    // refunded in full without clawing back from the seller. Best-effort.
-    // Split totals are checked against settleValue (what was ACTUALLY
-    // pulled), not the signed ceiling — a split sized for the ceiling would
-    // overdraw a settlement that pulled less under "upto".
-    if (Array.isArray(splits) && splits.length) {
-      const total = splits.reduce((s, x) => s + BigInt(x.value), 0n)
-      if (total <= settleValue) {
-        rec.pendingSplits = splits.map(s => ({ to: s.to, value: String(s.value) }))
-        stmts.settleSetSplits.run(JSON.stringify(rec.pendingSplits), id, rec.txHash)
-      } else {
-        console.error('settle: split total exceeds payment — skipping legs', String(total), '>', String(settleValue))
-      }
-    }
-
-    // payment receipt the client replays as X-PAYMENT to unlock the resource
-    const paymentReceipt = Buffer.from(JSON.stringify({ x402Version: 1, intent, txHash: rec.txHash, chainId: id })).toString('base64')
-    return { success: true, payer: intent.from, transaction: receipt.hash, network: `eip155:${id}`, chainId: id, payment: paymentReceipt, settledValue: String(settleValue) }
+    tx = await token.transferFrom(intent.from, intent.to, settleValue)
   } catch (e) {
-    // The claim is released on ANY failure here, including a tx that was
-    // actually broadcast but reverted on-chain (no funds moved) — safe to
-    // retry. The one case NOT covered (and not newly introduced by this
-    // fix — pre-existing either way): a crash between a successful
-    // tx.wait() and the nonceInsert/settleInsert writes below would lose
-    // the record of an already-executed transfer. That's an application-
-    // crash-during-a-10ms-window edge case, not something a retry lock
-    // can fix without on-chain idempotency (EIP-3009-style), and it's the
-    // same exposure every settlement here already had before this patch.
+    // No tx handle was returned: nothing we can track. Safe to release.
     releasePaymentNonce(id, intent.nonce)
     const m = String(e.shortMessage || e.message || e)
     if (/missing revert data|CALL_EXCEPTION/i.test(m)) {
@@ -482,6 +449,106 @@ async function settle(intent, signature, splits = null, chainId = DEFAULT_CHAIN_
     }
     return { success: false, errorReason: 'settle error: ' + m, payer: intent.from }
   }
+
+  // Durably record the broadcast BEFORE waiting. From here the nonce is only released
+  // on a PROVEN revert — never on a timeout/ambiguous error (that was a double-charge bug).
+  stmts.noncePending.run(JSON.stringify({ txHash: tx.hash, intent, settleValue: String(settleValue), t: Date.now() }), id, intent.nonce)
+  let receipt
+  try {
+    receipt = await tx.wait()
+  } catch (e) {
+    if (e && e.code === 'CALL_EXCEPTION' && e.receipt) {
+      stmts.nonceReleasePending.run(id, intent.nonce)
+      return { success: false, errorReason: 'on-chain transfer reverted (no funds moved) — retry the payment', payer: intent.from }
+    }
+    return pendingResponse(intent, tx.hash)
+  }
+  if (receipt && receipt.status === 0) {
+    stmts.nonceReleasePending.run(id, intent.nonce)
+    return { success: false, errorReason: 'on-chain transfer reverted (no funds moved) — retry the payment', payer: intent.from }
+  }
+  return finalizeSettlement(id, c, intent, settleValue, receipt, splits)
+}
+
+function pendingResponse(intent, txHash) {
+  return { success: false, pending: true, transaction: txHash, payer: intent.from, errorReason: 'transaction broadcast but confirmation not yet known — do NOT re-sign; retry the same settle request shortly and it will resolve against this tx' }
+}
+
+/** Persist a CONFIRMED settlement and build the receipt. Idempotent: only the first caller wins. */
+function finalizeSettlement(id, c, intent, settleValue, receipt, splits) {
+  const rec = {
+    chainId: id,
+    t: Date.now(),
+    payer: intent.from,
+    to: intent.to,
+    value: String(settleValue),
+    valueFormatted: ethers.formatUnits(settleValue, c.decimals),
+    resource: intent.resource || '',
+    txHash: receipt.hash,
+    gasUsed: receipt.gasUsed?.toString?.() || null,
+  }
+  const won = db.transaction(() => {
+    const info = stmts.nonceInsert.run(id, intent.nonce, rec.txHash, rec.t, rec.payer, rec.value)
+    if (info.changes === 0) return false
+    stmts.settleInsert.run(id, rec.txHash, rec.t, rec.payer, rec.to, rec.value, rec.valueFormatted, rec.resource, rec.gasUsed, null, null)
+    return true
+  })()
+  if (!won) return { success: false, errorReason: 'settlement already finalized', payer: intent.from }
+
+  // Marketplace fee split: seller leg is deferred until delivery (finalizeSplits). Checked against
+  // settleValue (what was ACTUALLY pulled), not the signed ceiling.
+  if (Array.isArray(splits) && splits.length) {
+    const total = splits.reduce((s, x) => s + BigInt(x.value), 0n)
+    if (total <= settleValue) {
+      rec.pendingSplits = splits.map(s => ({ to: s.to, value: String(s.value) }))
+      stmts.settleSetSplits.run(JSON.stringify(rec.pendingSplits), id, rec.txHash)
+    } else {
+      console.error('settle: split total exceeds payment — skipping legs', String(total), '>', String(settleValue))
+    }
+  }
+  const paymentReceipt = Buffer.from(JSON.stringify({ x402Version: 1, intent, txHash: rec.txHash, chainId: id })).toString('base64')
+  return { success: true, payer: intent.from, transaction: receipt.hash, network: `eip155:${id}`, chainId: id, payment: paymentReceipt, settledValue: String(settleValue) }
+}
+
+const PENDING_DROP_MS = 30 * 60 * 1000
+/** Look up a pending tx. Returns 'confirmed' (+receipt) | 'reverted' | 'dropped' | 'unknown'. */
+async function inspectPending(id, pend) {
+  try {
+    const p = provider(id)
+    const receipt = await p.getTransactionReceipt(pend.txHash)
+    if (receipt) return receipt.status === 1 ? { state: 'confirmed', receipt } : { state: 'reverted' }
+    const tx = await p.getTransaction(pend.txHash)
+    if (!tx && Date.now() - pend.t > PENDING_DROP_MS) return { state: 'dropped' }
+    return { state: 'unknown' }
+  } catch { return { state: 'unknown' } }
+}
+
+async function resolvePending(id, intent, splits) {
+  const c = chains.getChain(id)
+  const row = stmts.nonceGet.get(id, intent.nonce)
+  let pend
+  try { pend = JSON.parse(row.pending) } catch { return { success: false, errorReason: 'corrupt pending settlement record', payer: intent.from } }
+  const same = ['from', 'to', 'value', 'resource', 'validBefore'].every(k => String(pend.intent?.[k]) === String(intent[k]))
+  if (!same) return { success: false, errorReason: 'nonce already claimed by a pending settlement of a different intent', payer: intent.from }
+  const r = await inspectPending(id, pend)
+  if (r.state === 'confirmed') return finalizeSettlement(id, c, pend.intent, BigInt(pend.settleValue), r.receipt, splits)
+  if (r.state === 'reverted' || r.state === 'dropped') {
+    stmts.nonceReleasePending.run(id, intent.nonce)
+    return { success: false, errorReason: `previous settlement attempt ${r.state} (no funds moved) — retry the payment`, payer: intent.from }
+  }
+  return pendingResponse(intent, pend.txHash)
+}
+
+/** Boot/interval sweep: free nonces whose pending tx provably reverted or was dropped.
+ *  Confirmed ones are left for the buyer's retry so session/reputation side effects run exactly once. */
+async function reconcilePending() {
+  let released = 0
+  for (const row of stmts.noncePendingAll.all()) {
+    let pend; try { pend = JSON.parse(row.pending) } catch { continue }
+    const r = await inspectPending(row.chain_id, pend)
+    if (r.state === 'reverted' || r.state === 'dropped') { stmts.nonceReleasePending.run(row.chain_id, row.nonce); released++ }
+  }
+  return released
 }
 
 /**
@@ -496,7 +563,7 @@ async function settle(intent, signature, splits = null, chainId = DEFAULT_CHAIN_
  * function does not re-derive them, it just executes + records the tx.
  * Returns { success, transaction?, errorReason? }.
  */
-async function claimChannel({ payer, payTo, netValue, chainId }) {
+async function claimChannel({ payer, payTo, netValue, chainId, onBroadcast }) {
   const id = Number(chainId)
   const c = chains.getChain(id)
   const value = BigInt(netValue)
@@ -530,15 +597,26 @@ async function claimChannel({ payer, payTo, netValue, chainId }) {
     return { success: false, errorReason: `cannot read ${c.usdcSymbol} state from ${c.name} — RPC may be busy, retry in a moment` }
   }
 
+  let tx
   try {
-    const tx = await token.transferFrom(payer, payTo, value)
+    tx = await token.transferFrom(payer, payTo, value)
+  } catch (e) {
+    return { success: false, errorReason: 'channel claim error: ' + String(e.shortMessage || e.message || e) }
+  }
+  // Persist the broadcast before waiting so a timeout/crash cannot cause a second claim of the same value.
+  if (onBroadcast) onBroadcast(tx.hash)
+  try {
     const receipt = await tx.wait()
+    if (receipt && receipt.status === 0) return { success: false, reverted: true, errorReason: 'channel claim reverted on-chain (no funds moved)' }
     return { success: true, transaction: receipt.hash, network: `eip155:${id}`, chainId: id, claimedValue: value.toString() }
   } catch (e) {
-    const m = String(e.shortMessage || e.message || e)
-    return { success: false, errorReason: 'channel claim error: ' + m }
+    if (e && e.code === 'CALL_EXCEPTION' && e.receipt) return { success: false, reverted: true, errorReason: 'channel claim reverted on-chain (no funds moved)' }
+    return { success: false, pending: true, transaction: tx.hash, errorReason: 'claim broadcast but confirmation unknown — retry shortly to resolve against this tx' }
   }
 }
+
+/** Inspect a previously broadcast tx: { state: 'confirmed'|'reverted'|'dropped'|'unknown', receipt? }. */
+function inspectTx(chainId, txHash, t) { return inspectPending(Number(chainId), { txHash, t }) }
 
 /**
  * Decode an X-PAYMENT header (base64 JSON of { intent, txHash, chainId })
@@ -551,14 +629,20 @@ async function claimChannel({ payer, payTo, netValue, chainId }) {
  */
 function paymentRecordFor(header, resource, expectedChainId = DEFAULT_CHAIN_ID) {
   try {
-    if (!header) return null
+    if (!header || !resource) return null
     const decoded = JSON.parse(Buffer.from(String(header), 'base64').toString('utf8'))
     const intent = decoded.intent || decoded
     const chainId = Number(decoded.chainId || DEFAULT_CHAIN_ID)
     if (chainId !== Number(expectedChainId)) return null
     const rec = stmts.nonceGet.get(chainId, intent.nonce)
-    if (!rec) return null
-    if (resource && intent.resource && intent.resource !== resource) return null
+    // Only a CONFIRMED settlement counts: placeholder / pending / 'act:' rows have no tx_hash.
+    if (!rec || !rec.tx_hash || !rec.from_addr) return null
+    // The header is client-controlled. Trust only server-side records: the receipt's txHash must equal
+    // the stored one, and the resource/payer/value come from the settlement row, never from the header.
+    if (String(decoded.txHash || '') !== rec.tx_hash) return null
+    const st = stmts.settleByTx.get(chainId, rec.tx_hash)
+    if (!st || st.resource !== resource) return null
+    if (String(st.payer).toLowerCase() !== String(rec.from_addr).toLowerCase() || String(st.value) !== String(rec.value)) return null
     return { txHash: rec.tx_hash, from: rec.from_addr, value: rec.value, nonce: intent.nonce, chainId }
   } catch { return null }
 }
@@ -674,11 +758,15 @@ function cancelSplits(txHash, chainId) {
   return true
 }
 
+// _test: internals exposed ONLY for regression tests (fake provider injection).
+const _test = { _providers, finalizeSettlement, resolvePending, stmts }
+
 module.exports = {
+  _test,
   verify, settle, publicView, publicViewAll, chainReadiness, paymentRecordFor, claimReceipt, settleLogAll,
   isConfigured,
   finalizeSplits, cancelSplits, currentBlock, refundPayment, payout, claimNonce, releaseNonce,
-  claimChannel,
+  claimChannel, reconcilePending, inspectTx,
   claimPaymentNonce, releasePaymentNonce, // exported for the dedicated race-condition regression unit test
   domainFor, INTENT_TYPES,
   // back-compat single-chain exports (Robinhood 4663, the pre-multichain default)

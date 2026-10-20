@@ -59,9 +59,29 @@ function run() {
     const buyerTokenAccount = await kit.createKeyPairSignerFromPrivateKeyBytes(genKeypairSeed())
     const merchantTokenAccount = await kit.createKeyPairSignerFromPrivateKeyBytes(genKeypairSeed())
     const mint = await kit.createKeyPairSignerFromPrivateKeyBytes(genKeypairSeed())
+    process.env.COVENANT_SOLANA_MINT = mint.address
+    process.env.COVENANT_SOLANA_PAYTO = merchantTokenAccount.address
 
     function legitTransferCheckedIx() {
       return getTransferCheckedInstruction({ source: buyerTokenAccount.address, mint: mint.address, destination: merchantTokenAccount.address, authority: buyerSigner, amount: 1000n, decimals: 6 })
+    }
+
+    // -- [audit 2026-10] payment binding: verify() must check mint / recipient / amount --
+    {
+      const other = await kit.createKeyPairSignerFromPrivateKeyBytes(genKeypairSeed())
+      const bad = (over) => getTransferCheckedInstruction({ source: buyerTokenAccount.address, mint: mint.address, destination: merchantTokenAccount.address, authority: buyerSigner, amount: 1000n, decimals: 6, ...over })
+      const run = async (ix, extra = {}) => solana.verify({ transaction: await buildTx({ feePayerAddress: feePayerSigner.address, instructions: [ix] }), ...extra })
+      assert.strictEqual((await run(bad({ destination: other.address }))).ok, false, 'wrong recipient must be rejected')
+      assert.strictEqual((await run(bad({ mint: other.address }))).ok, false, 'wrong mint must be rejected')
+      assert.strictEqual((await run(bad(), { amount: '999' })).ok, false, 'amount mismatch vs requested must be rejected')
+      assert.strictEqual((await run(bad(), { payTo: other.address })).ok, false, 'caller cannot widen/redirect payTo')
+      assert.strictEqual((await run(bad(), { amount: '1000', payTo: merchantTokenAccount.address, asset: mint.address })).ok, true, 'matching requirements verify')
+      const two = await buildTx({ feePayerAddress: feePayerSigner.address, instructions: [bad(), bad()] })
+      assert.strictEqual((await solana.verify({ transaction: two })).ok, false, 'extra instructions must be rejected')
+      delete process.env.COVENANT_SOLANA_PAYTO
+      assert.strictEqual((await run(bad())).ok, false, 'unconfigured recipient must fail closed')
+      process.env.COVENANT_SOLANA_PAYTO = merchantTokenAccount.address
+      ok('[audit] Solana verify binds mint/recipient/amount, single-instruction only, fails closed when unconfigured')
     }
 
     // -- happy path: a real SPL TransferChecked payment verifies, and the

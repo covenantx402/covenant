@@ -54,14 +54,29 @@ const chains = require('./chains')
 // here: claims are a low-frequency, operator-triggered action (not a
 // per-request hot path like verifyVoucher), and this process is the
 // only writer to batch_channels.
-const _claimingChannels = new Set()
+// DB-backed lock (audit 2026-10): the old in-memory Set did not span processes or restarts.
+// A lock older than CLAIM_LOCK_TTL_MS is treated as stale (crashed holder); an in-flight
+// broadcast is protected separately by claim_pending, which survives the lock.
+const CLAIM_LOCK_TTL_MS = 10 * 60 * 1000
 function tryLockChannel(channelId) {
-  if (_claimingChannels.has(channelId)) return false
-  _claimingChannels.add(channelId)
-  return true
+  const now = Date.now()
+  return db.prepare('UPDATE batch_channels SET claim_lock = ? WHERE id = ? AND (claim_lock IS NULL OR claim_lock < ?)')
+    .run(now, String(channelId || ''), now - CLAIM_LOCK_TTL_MS).changes > 0
 }
 function unlockChannel(channelId) {
-  _claimingChannels.delete(channelId)
+  db.prepare('UPDATE batch_channels SET claim_lock = NULL WHERE id = ?').run(String(channelId || ''))
+}
+/** A broadcast-but-unrecorded claim tx: { txHash, netValue, totalValue, close, t }. */
+function setClaimPending(channelId, obj) {
+  db.prepare('UPDATE batch_channels SET claim_pending = ? WHERE id = ?').run(JSON.stringify(obj), String(channelId))
+}
+function clearClaimPending(channelId) {
+  db.prepare('UPDATE batch_channels SET claim_pending = NULL WHERE id = ?').run(String(channelId))
+}
+function getClaimPending(channelId) {
+  const r = db.prepare('SELECT claim_pending, chain_id FROM batch_channels WHERE id = ?').get(String(channelId || ''))
+  if (!r || !r.claim_pending) return null
+  try { return { ...JSON.parse(r.claim_pending), chainId: r.chain_id } } catch { return null }
 }
 
 const DOMAIN_NAME = 'COVENANT'
@@ -185,13 +200,15 @@ function netClaimable(channelId) {
   return { ok: true, channel: rowToChannel(ch), netValue: net.toString(), totalValue: total.toString() }
 }
 
-/** Record a successful on-chain claim against a channel. */
-function recordClaim(channelId, txHash, closeChannel) {
+/** Record a successful on-chain claim. claimedTotal is the cumulative value the tx actually covered —
+ *  NOT the channel's current high-water mark, which a concurrent voucher may have raised since. */
+function recordClaim(channelId, txHash, closeChannel, claimedTotal) {
   const ch = stmts.get.get(String(channelId || ''))
   if (!ch) return
   const hashes = JSON.parse(ch.claimed_tx_hashes || '[]')
   hashes.push(txHash)
-  stmts.claim.run(ch.last_cumulative_value, JSON.stringify(hashes), closeChannel ? 1 : 0, ch.id)
+  stmts.claim.run(String(claimedTotal), JSON.stringify(hashes), closeChannel ? 1 : 0, ch.id)
+  clearClaimPending(ch.id)
 }
 
 function listOpenChannels(payer) {
@@ -201,5 +218,5 @@ function listOpenChannels(payer) {
 module.exports = {
   VOUCHER_TYPES, domainFor, MAX_CHANNEL_LIFETIME_SEC,
   openChannel, getChannel, verifyVoucher, netClaimable, recordClaim, listOpenChannels,
-  tryLockChannel, unlockChannel,
+  tryLockChannel, unlockChannel, setClaimPending, clearClaimPending, getClaimPending,
 }

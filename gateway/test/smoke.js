@@ -16,6 +16,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'covenant-test-'))
 // Isolate in-process module stores too (reputation is required directly below,
 // so it must open the SAME sqlite file the spawned server process writes to).
 process.env.COVENANT_DB_PATH = path.join(tmp, 'gateway.db')
+process.env.COVENANT_VAULT_KEY = 'smoke-test-vault-key-0123456789abcdef'
 
 // A real (but freshly-generated, worthless, devnet-only) Solana fee-payer
 // key so the spawned server's /x402/solana/* endpoints are actually
@@ -25,12 +26,14 @@ const bs58Mod = require('bs58')
 const bs58 = bs58Mod.default || bs58Mod
 const solanaFeePayerKp = crypto.generateKeyPairSync('ed25519')
 const SOLANA_FEE_PAYER_SEED = solanaFeePayerKp.privateKey.export({ type: 'pkcs8', format: 'der' }).slice(-32)
+const SMOKE_SOL_MINT = bs58.encode(Buffer.alloc(32, 7))   // deterministic test mint
+const SMOKE_SOL_PAYTO = bs58.encode(Buffer.alloc(32, 9))  // deterministic test recipient token account
 const SOLANA_FEE_PAYER_KEY_B58 = bs58.encode(SOLANA_FEE_PAYER_SEED)
 
 function req(method, p, body, headers = {}) {
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null
-    const r = http.request(BASE + p, { method, headers: { 'content-type': 'application/json', ...headers } }, res => {
+    const r = http.request(BASE + p, { method, headers: { 'content-type': 'application/json', ...(data ? { 'content-length': Buffer.byteLength(data) } : {}), ...headers } }, res => {
       let out = ''
       res.on('data', c => out += c)
       res.on('end', () => { try { resolve({ status: res.statusCode, headers: res.headers, json: JSON.parse(out) }) } catch { resolve({ status: res.statusCode, headers: res.headers, text: out }) } })
@@ -50,9 +53,13 @@ function startServer() {
         COVENANT_RPC_UPSTREAM: process.env.COVENANT_RPC_UPSTREAM || 'https://robinhood-rpc.publicnode.com',
         COVENANT_PORT: String(PORT),
         COVENANT_SETTLE_KEY: '0x' + '11'.repeat(32),
+        COVENANT_VAULT_KEY: 'smoke-test-vault-key-0123456789abcdef',
+        COVENANT_ADMIN_TOKEN: 'smoke-admin-token-0123456789abcdef',
         COVENANT_DB_PATH: path.join(tmp, 'gateway.db'),
         COVENANT_ROUTES_STORE: path.join(tmp, 'routes.json'),
         COVENANT_SOLANA_FEE_PAYER_KEY: SOLANA_FEE_PAYER_KEY_B58,
+        COVENANT_SOLANA_MINT: SMOKE_SOL_MINT,
+        COVENANT_SOLANA_PAYTO: SMOKE_SOL_PAYTO,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -90,6 +97,22 @@ async function main() {
     // wallet create
     const w = await req('POST', '/wallets/create', { label: 'w1' }, AUTH)
     assert.strictEqual(w.status, 201); assert.ok(w.json.address.startsWith('0x')); ok('wallet created')
+
+    // [audit 2026-10 Critical] an ordinary agent key can no longer list/revoke other tenants' keys
+    const victim = await req('POST', '/keys', { label: 'victim' })
+    const gl = await req('GET', '/keys', null, AUTH)
+    assert.strictEqual(gl.status, 403, 'agent key must not list global keys')
+    const gd = await req('DELETE', '/keys', { id: victim.json.id }, AUTH)
+    assert.strictEqual(gd.status, 403, 'agent key must not revoke other keys: ' + JSON.stringify(gd.json) + '')
+    const still = await req('GET', '/vault/entries', null, { Authorization: 'Bearer ' + victim.json.key })
+    assert.strictEqual(still.status, 200, 'victim key still works')
+    const ADMIN = { Authorization: 'Bearer smoke-admin-token-0123456789abcdef' }
+    assert.strictEqual((await req('GET', '/keys', null, ADMIN)).status, 200, 'admin token can list')
+    assert.strictEqual((await req('DELETE', '/keys', { id: victim.json.id }, ADMIN)).status, 200, 'admin token can revoke')
+    assert.strictEqual((await req('GET', '/vault/entries', null, { Authorization: 'Bearer ' + victim.json.key })).status, 401)
+    const short = await req('POST', '/vault/entries', { name: 'tiny', value: 'abc' }, AUTH)
+    assert.strictEqual(short.status, 400, 'short secrets rejected')
+    ok('[audit] /keys global list/revoke is admin-only; short vault secrets rejected')
 
     // vault/wallet isolation: a second agent key must not see agent 1's
     // secrets or wallets — each is scoped to its owning key, not global.
@@ -313,8 +336,8 @@ async function main() {
 
     const solanaBuyer = await kit.createKeyPairSignerFromPrivateKeyBytes(crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'der' }).slice(-32))
     const buyerTokenAccount = await kit.createKeyPairSignerFromPrivateKeyBytes(crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'der' }).slice(-32))
-    const merchantTokenAccount = await kit.createKeyPairSignerFromPrivateKeyBytes(crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'der' }).slice(-32))
-    const solanaMint = await kit.createKeyPairSignerFromPrivateKeyBytes(crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'der' }).slice(-32))
+    const merchantTokenAccount = { address: SMOKE_SOL_PAYTO }
+    const solanaMint = { address: SMOKE_SOL_MINT }
     const feePayerAddress = (await kit.createKeyPairSignerFromPrivateKeyBytes(SOLANA_FEE_PAYER_SEED)).address
     const fakeBlockhash = { blockhash: '11111111111111111111111111111111111111111', lastValidBlockHeight: 999999999n }
     // A real SPL TransferChecked instruction — this gateway's anti-drain

@@ -296,6 +296,15 @@ if (!hasColumn('nonces', 'chain_id')) {
   console.log('[db] migrated nonces -> composite (chain_id, nonce) primary key')
 }
 
+// --- Security hardening migrations (audit 2026-10) ---
+// nonces.pending: JSON of a broadcast-but-unconfirmed transferFrom, so the
+// nonce is NEVER released while a tx may still land (see facilitator.settle).
+if (!hasColumn('nonces', 'pending')) db.exec('ALTER TABLE nonces ADD COLUMN pending TEXT')
+// batch_channels.claim_lock: DB-backed (multi-process, restart-safe) claim lock.
+// batch_channels.claim_pending: JSON of a broadcast-but-unrecorded claim.
+if (!hasColumn('batch_channels', 'claim_lock')) db.exec('ALTER TABLE batch_channels ADD COLUMN claim_lock INTEGER')
+if (!hasColumn('batch_channels', 'claim_pending')) db.exec('ALTER TABLE batch_channels ADD COLUMN claim_pending TEXT')
+
 if (!hasColumn('settlements', 'chain_id')) {
   // Same atomic migration guarantee for settlement history — this table is
   // financial/audit evidence, so a partial rebuild is unacceptable.
