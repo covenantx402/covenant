@@ -126,7 +126,7 @@ None of the four supported chains' stablecoin deployments implement EIP-3009 `tr
 3. Agent POSTs `{ intent, signature, chainId }` to `POST /facilitator/settle`.
 4. Facilitator verifies signature + balance + allowance + authorization window + nonce replay **on that chain**, executes `transferFrom`, returns the tx hash.
 
-Every settlement is replay-guarded by a persisted `(chain_id, nonce)` pair and auditable by tx hash. Set `resource: "session"` instead to open a 100-call / 1h prepaid session in the same settle call — see [`/x402/premium`'s `x-payment-info.protocols[1]`](#why-this-isnt-just-a-402-demo).
+Every settlement is replay-guarded by a persisted `(chain_id, nonce)` pair and auditable by tx hash. Set `resource: "session"` instead to open a 100-call / 1h prepaid session in the same settle call (entitlement is fixed server-side). If the chain confirmation is not yet known, `/facilitator/settle` returns `202 {pending:true, transaction}` — re-send the same request; it resolves against that tx and never double-charges — see [`/x402/premium`'s `x-payment-info.protocols[1]`](#why-this-isnt-just-a-402-demo).
 
 ## Who pays gas, and the per-chain price floor
 
@@ -320,6 +320,7 @@ curl -X POST https://gateway.covenantx402.com/x402/solana/settle -d '{"transacti
 **Agent identity (key-authed via `Authorization: Bearer cvn_...`):**
 
 - `POST /keys` — mint an agent API key (shown once)
+- `DELETE /keys/self` — revoke the key making the request (global `GET/DELETE /keys` are admin-only via `COVENANT_ADMIN_TOKEN`)
 - `POST /vault/entries`, `POST /vault/broker` — store secrets, or run a prompt with secrets injected server-side (**the secret never reaches the agent's context**)
 - `POST /wallets/create` — server-generated agent wallet
 - `GET /analytics/keys` — per-key usage stats
