@@ -82,7 +82,9 @@ async function run() {
     // cross-host redirect never carries seller private headers
     let seen = null
     const sink = http.createServer((q, r) => { seen = q.headers['x-seller-key'] || null; r.setHeader('content-type', 'application/json'); r.end('{}') })
-    await new Promise(r => sink.listen(0, '127.0.0.1', r))
+    // `localhost` resolves to ::1 first on some hosts (e.g. CI runners) and 127.0.0.1 on others: listen dual-stack so the
+    // redirect target is reachable either way, and fall back to IPv4 where IPv6 is unavailable.
+    await new Promise((resolve, reject) => { sink.once('error', reject); sink.listen(0, '::', resolve) }).catch(() => new Promise(r => { sink.removeAllListeners('error'); sink.listen(0, '127.0.0.1', r) }))
     process.env.COVENANT_ALLOW_LOOPBACK_UPSTREAM = '1'
     const redir2 = http.createServer((_q, r) => { r.statusCode = 302; r.setHeader('location', `http://localhost:${sink.address().port}/`); r.end() })
     await new Promise(r => redir2.listen(0, '127.0.0.1', r))
