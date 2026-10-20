@@ -101,13 +101,18 @@ function hits() {
   return stmts.countHits402.get().n
 }
 
+let marketplaceSlugTaken = () => false
+function setMarketplaceSlugCheck(fn) { marketplaceSlugTaken = fn }
+
 function create({ path: p, price, description, payTo }) {
   if (!/^\/[A-Za-z0-9/_-]{1,64}$/.test(p || '')) throw new Error('path must look like /alerts')
   if (!/^\d+(\.\d{1,6})?$/.test(String(price || ''))) throw new Error('price must be a decimal, e.g. 0.01')
+  if (!(Number(price) >= 0.01)) throw new Error('price must be at least 0.01 (settlement-cost floor)')
+  if (description != null && (typeof description !== 'string' || description.length > 240)) throw new Error('description must be a string of at most 240 chars')
   if (payTo && !/^0x[0-9a-fA-F]{40}$/.test(payTo)) throw new Error('payTo must be a 0x address')
   if (stmts.count.get().n >= MAX_ROUTES) throw new Error('route registry is full — contact the gateway operator')
   const slug = slugify(p)
-  if (has(slug)) throw new Error('path already registered')
+  if (has(slug) || marketplaceSlugTaken(slug)) throw new Error('path already registered')
   const rec = {
     slug,
     path: p,
@@ -145,6 +150,7 @@ function seed() {
 seed()
 
 module.exports = {
+  setMarketplaceSlugCheck,
   list, get, has, create, requirement, USDG, hits, bump, log, priceToAtomic,
   get activity() { return activityList() },
 }

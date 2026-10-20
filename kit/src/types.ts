@@ -68,6 +68,8 @@ export interface PaywallConfig {
    * Strongly recommended whenever settlementWebhook is set.
    */
   settlementWebhookSecret?: string;
+  /** Canonical public origin (e.g. https://api.example.com). When set, 402 resource URLs use it instead of request headers. */
+  publicOrigin?: string;
 }
 
 export interface PaymentRequirements {

@@ -41,6 +41,23 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run build
+      - run: npm test
+
+  mcp:
+    name: mcp tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mcp/package-lock.json
+      - run: npm ci
+      - run: npm test
 
   docker:
     name: docker build
@@ -51,8 +68,10 @@ jobs:
         run: docker build -t covenant-gateway:ci .
       - name: smoke-run the built image
         run: |
+          # COVENANT_VAULT_KEY is mandatory (the gateway refuses to start without it): CI uses a throwaway value.
           docker run -d --name covenant-ci -p 8792:8792 \
             -e COVENANT_RPC_UPSTREAM=https://robinhood-rpc.publicnode.com \
+            -e COVENANT_VAULT_KEY=ci-only-throwaway-vault-key-0123456789 \
             covenant-gateway:ci
           for i in $(seq 1 15); do
             curl -sf http://127.0.0.1:8792/x402/health && exit 0
@@ -61,3 +80,8 @@ jobs:
           echo "gateway did not become healthy in time"
           docker logs covenant-ci
           exit 1
+      - name: image refuses to start without a vault key (audit 2026-10)
+        run: |
+          docker rm -f covenant-ci >/dev/null 2>&1 || true
+          out=$(docker run --rm -e COVENANT_RPC_UPSTREAM=https://robinhood-rpc.publicnode.com covenant-gateway:ci 2>&1 || true)
+          echo "$out" | grep -q "COVENANT_VAULT_KEY is required" || { echo "expected a clear vault-key error, got:"; echo "$out"; exit 1; }
