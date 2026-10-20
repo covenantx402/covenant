@@ -92,6 +92,7 @@ Use a **disposable wallet holding only a few cents of USDG plus a little gas**. 
 | `COVENANT_AGENT_KEY_FILE` / `COVENANT_AGENT_KEY` | none | agent key for vault and wallets; `register_agent` writes it to the file |
 | `COVENANT_WALLET_EXPORT_DIR` | none | enables `covenant_wallet_create`; keys are written here |
 | `COVENANT_VAULT_SRC_<NAME>` | none | secret values the model may *name* (never see) for `covenant_vault_set` |
+| `COVENANT_FACILITATOR` | COVENANT's known spender | the only address the server will ever approve/pay; set only if it legitimately changes |
 | `COVENANT_MAX_PAYMENT_USDG` | `0.05` | hard ceiling per payment |
 | `COVENANT_SESSION_BUDGET_USDG` | `0.10` | total this server process may ever spend |
 | `COVENANT_RPC_URL` | public Robinhood RPC | used only for the one-time approval |
@@ -103,6 +104,8 @@ Use a **disposable wallet holding only a few cents of USDG plus a little gas**. 
 - **Server-enforced limits**, independent of what the model says: per-call `maxUsdg`, a hard per-payment cap, and a session budget.
 - **The model can't choose where money or secrets go.** It can name a route slug, an address, a vault entry name or an env-var name. It can never supply a URL, header, method or secret value. Before signing, the server refuses any challenge whose network isn't Robinhood Chain 4663, whose asset isn't the known USDG contract, whose `payTo` differs from the facilitator spender, or whose resource is outside the configured gateway.
 - **Secrets never enter the model's context.** The agent key, wallet keys and mnemonics live in mode-600 files; vault values are read from the server environment; broker output is scrubbed. Tests assert none of them appear in tool output or logs.
+- **Pinned facilitator and serialized payments.** Only COVENANT's known facilitator address is ever approved or paid, even if the gateway says otherwise. Confirmed payments run one at a time, and the price is reserved against the budget before signing (a pending or failed settle stays counted, so a retry can't silently double-spend).
+- **Hostile-gateway hardening.** Redirects are refused, amounts are parsed strictly, responses are size-capped, wallet/RPC errors never reveal the RPC URL, and gateway text in errors is labelled untrusted.
 - **Idempotent settlement.** The gateway settles one signed intent at most once, so a retry after a timeout cannot double-charge.
 
 ## Limitations
