@@ -1,6 +1,6 @@
 {
   "name": "@covenantx402/mcp",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "MCP server for COVENANT: discover x402 paid APIs, inspect 402 challenges, and (opt-in, capped, confirmed) pay in USDG on Robinhood Chain.",
   "type": "module",
   "main": "src/index.js",
@@ -14,7 +14,8 @@
   ],
   "scripts": {
     "start": "node src/index.js",
-    "test": "node test/mcp.test.mjs"
+    "test": "node test/mcp.test.mjs && node test/http.test.mjs",
+    "start:http": "node src/http.js"
   },
   "engines": {
     "node": ">=20"
