@@ -50,6 +50,7 @@ gateway/   Zero-dependency HTTP gateway: RPC proxy, x402 v1+v2, vault, facilitat
 kit/       TypeScript middleware (@covenantx402/x402-kit) — Express paywall + usage analytics
 examples/  Runnable examples: paywalled API, agent client that pays
 skill/     Agent skill file (SKILL.md) — teach any agent (Claude/Cursor/Hermes) to use COVENANT
+mcp/       MCP server (@covenantx402/mcp) — typed tools for discovery, 402 inspection, receipts and opt-in capped payment
 Dockerfile, docker-compose.yml   Multi-stage build + one-command run (see Quick start below)
 ```
 
@@ -368,6 +369,14 @@ cd gateway && npm test     # smoke.js, preflight.js, pay-once.js, pay-onchain.js
 cd kit && npm run build    # tsc -p .
 ```
 CI (`.github/workflows/ci.yml`) runs both on every push/PR to `main`.
+
+## MCP server
+
+[`mcp/`](mcp/README.md) exposes COVENANT as typed MCP tools. Read-only by default; `covenant_pay` exists only when you configure a wallet, and is dry-run-first with server-enforced per-payment and session caps.
+
+```bash
+claude mcp add covenant -- npx -y @covenantx402/mcp
+```
 
 ## Agent skill
 
