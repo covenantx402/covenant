@@ -19,7 +19,8 @@ services:
       # without this; paid routes return a clear "not configured" error).
       COVENANT_SETTLE_KEY: ${COVENANT_SETTLE_KEY:-}
       COVENANT_X402_PAYTO: ${COVENANT_X402_PAYTO:-0x0000000000000000000000000000000000000000}
-      COVENANT_VAULT_KEY: ${COVENANT_VAULT_KEY:-}
+      # REQUIRED (>= 16 chars, high entropy). The gateway refuses to start without it; compose fails fast with this message.
+      COVENANT_VAULT_KEY: ${COVENANT_VAULT_KEY:?set COVENANT_VAULT_KEY (>= 16 chars) - e.g. openssl rand -hex 32}
       COVENANT_TRUSTED_PROXIES: ${COVENANT_TRUSTED_PROXIES:-}
     volumes:
       # Persist the SQLite DB (vault entries, wallets, keys, settlements)
