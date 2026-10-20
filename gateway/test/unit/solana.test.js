@@ -8,7 +8,7 @@
 // @solana/kit library's own test suite, not by this project's own
 // end-to-end run). Flagged honestly rather than silently skipped.
 //
-// SECURITY: a chunk of this file is dedicated to assertSafeTx — a REAL P0
+// Note: a chunk of this file is dedicated to assertSafeTx — a real
 // anti-drain vulnerability was found and fixed in this module (see
 // solana.js's assertSafeTx docstring and the commit message for the full
 // writeup). A buyer with a perfectly legitimate signature could smuggle a
@@ -66,7 +66,7 @@ function run() {
       return getTransferCheckedInstruction({ source: buyerTokenAccount.address, mint: mint.address, destination: merchantTokenAccount.address, authority: buyerSigner, amount: 1000n, decimals: 6 })
     }
 
-    // -- [audit 2026-10] payment binding: verify() must check mint / recipient / amount --
+    // -- payment binding: verify() must check mint / recipient / amount --
     {
       const other = await kit.createKeyPairSignerFromPrivateKeyBytes(genKeypairSeed())
       const bad = (over) => getTransferCheckedInstruction({ source: buyerTokenAccount.address, mint: mint.address, destination: merchantTokenAccount.address, authority: buyerSigner, amount: 1000n, decimals: 6, ...over })
@@ -81,7 +81,7 @@ function run() {
       delete process.env.COVENANT_SOLANA_PAYTO
       assert.strictEqual((await run(bad())).ok, false, 'unconfigured recipient must fail closed')
       process.env.COVENANT_SOLANA_PAYTO = merchantTokenAccount.address
-      ok('[audit] Solana verify binds mint/recipient/amount, single-instruction only, fails closed when unconfigured')
+      ok('Solana verify binds mint/recipient/amount, single-instruction only, fails closed when unconfigured')
     }
 
     // -- happy path: a real SPL TransferChecked payment verifies, and the
@@ -113,7 +113,7 @@ function run() {
       ok('malformed transaction input is rejected gracefully, not an uncaught throw')
     }
 
-    // ============ P0 ANTI-DRAIN REGRESSION TESTS ============
+    // ============ ANTI-DRAIN TESTS ============
     // See solana.js's assertSafeTx docstring. These PoCs were confirmed
     // exploitable (verify() returned ok:true) before the fix existed.
 
@@ -128,9 +128,9 @@ function run() {
       const drainIx = getTransferSolInstruction({ source: kit.createNoopSigner(feePayerSigner.address), destination: attackerSigner.address, amount: 5_000_000_000n })
       const tx = await buildTx({ feePayerAddress: feePayerSigner.address, instructions: [legitIx, drainIx] })
       const v = await solana.verify({ transaction: tx })
-      assert.strictEqual(v.ok, false, 'CRITICAL: this transaction drains the fee payer\'s own SOL via a smuggled SystemProgram instruction and must never verify as ok')
+      assert.strictEqual(v.ok, false, 'this transaction drains the fee payer\'s own SOL via a smuggled SystemProgram instruction and must never verify as ok')
       assert.ok(/non-allowlisted program/.test(v.reason))
-      ok('[P0 regression] a smuggled SystemProgram instruction that drains the fee payer\'s SOL is rejected, even alongside a real buyer signature')
+      ok('a smuggled SystemProgram instruction that drains the fee payer\'s SOL is rejected, even alongside a real buyer signature')
     }
 
     // -- fee payer made the AUTHORITY of a TransferChecked instruction:
@@ -145,9 +145,9 @@ function run() {
       const drainIx = getTransferCheckedInstruction({ source: feePayerTokenAccount.address, mint: mint.address, destination: attackerTokenAccount.address, authority: kit.createNoopSigner(feePayerSigner.address), amount: 999_999_999n, decimals: 6 })
       const tx = await buildTx({ feePayerAddress: feePayerSigner.address, instructions: [drainIx] })
       const v = await solana.verify({ transaction: tx })
-      assert.strictEqual(v.ok, false, 'CRITICAL: this transaction drains the fee payer\'s own SPL token balance by making it the transfer authority and must never verify as ok')
+      assert.strictEqual(v.ok, false, 'this transaction drains the fee payer\'s own SPL token balance by making it the transfer authority and must never verify as ok')
       assert.ok(/fee payer account is referenced inside a token-program instruction/.test(v.reason))
-      ok('[P0 regression] making the fee payer the AUTHORITY of a token transfer (draining its own token balance) is rejected')
+      ok('making the fee payer the AUTHORITY of a token transfer (draining its own token balance) is rejected')
     }
 
     // -- non-allowlisted program used alone (no smuggling needed) --

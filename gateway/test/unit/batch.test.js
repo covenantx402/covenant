@@ -130,7 +130,7 @@ function run() {
       ok('an expired channel that WAS used (has real accumulated value) is NOT swept — only zero-activity abandonment is garbage-collected')
     }
 
-    // -- [P0-adjacent regression] per-channel claim lock. Found by audit:
+    // -- per-channel claim lock. Why:
     //    two concurrent POST /x402/batch/claim requests for the same
     //    channel both read the same net-claimable amount before either
     //    recorded its claim — both would have executed a real on-chain
@@ -141,7 +141,7 @@ function run() {
     {
       const ch = batch.openChannel({ payer: wallet.address, payTo, chainId: 4663 })
       assert.strictEqual(batch.tryLockChannel(ch.channelId), true, 'first lock attempt on an unlocked channel succeeds')
-      assert.strictEqual(batch.tryLockChannel(ch.channelId), false, 'CRITICAL: a second concurrent lock attempt on the SAME channel while still held must fail — this is the exact condition that let two claims double-spend the same voucher total')
+      assert.strictEqual(batch.tryLockChannel(ch.channelId), false, 'a second concurrent lock attempt on the SAME channel while still held must fail — this is the exact condition that let two claims double-spend the same voucher total')
       batch.unlockChannel(ch.channelId)
       assert.strictEqual(batch.tryLockChannel(ch.channelId), true, 'after unlocking, a fresh lock attempt succeeds again')
       batch.unlockChannel(ch.channelId)

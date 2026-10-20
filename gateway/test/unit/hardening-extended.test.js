@@ -1,4 +1,4 @@
-// Regression tests for audit phase 2 (marketplace, balance/withdraw, registry, rpc, nonce casing).
+// Hardening tests: marketplace ownership and upstream safety, balance/withdraw, registry rules, RPC proxy limits, nonce casing.
 'use strict'
 const assert = require('assert')
 const fs = require('fs'), os = require('os'), path = require('path'), http = require('http')
@@ -130,6 +130,6 @@ async function run() {
     ok('[P2-7] failed buyer refunds are persisted (refund_due), retried, and cleared on success')
   }
 
-  console.log(`\nUNIT PASS (audit-phase2) — ${pass} checks`)
+  console.log(`\nUNIT PASS (hardening-extended) — ${pass} checks`)
 }
 run().then(() => process.exit(0)).catch(e => { console.error(e); process.exit(1) })

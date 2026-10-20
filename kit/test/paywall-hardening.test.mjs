@@ -1,4 +1,4 @@
-// Regression tests for kit audit findings A1-A5. Run: npm test (builds first).
+// Paywall hardening tests: path normalisation, HEAD handling, receipt replay, header validation, webhook signing. Run: npm test (builds first).
 import assert from "node:assert";
 import http from "node:http";
 import os from "node:os";

@@ -1,5 +1,5 @@
 // test/unit/facilitator-nonce-lock.test.js — regression test for a race
-// condition found during security audit: facilitator.settle()'s nonce
+// condition scenario: facilitator.settle()'s nonce
 // uniqueness check (usedNoncesHas) and the actual nonce-recording insert
 // (nonceInsert, after a successful on-chain transferFrom) were separated
 // by the ENTIRE RPC round-trip + transferFrom + tx.wait() — a long
@@ -41,7 +41,7 @@ function run() {
   //    transferFrom for the identical signed intent. --
   {
     assert.strictEqual(facilitator.claimPaymentNonce(4663, nonce1), true, 'first claim on an unclaimed nonce succeeds')
-    assert.strictEqual(facilitator.claimPaymentNonce(4663, nonce1), false, 'CRITICAL: a second concurrent claim on the SAME nonce must fail — this exact condition let two settle() calls both reach the on-chain transferFrom for one signature')
+    assert.strictEqual(facilitator.claimPaymentNonce(4663, nonce1), false, 'a second concurrent claim on the SAME nonce must fail — this exact condition let two settle() calls both reach the on-chain transferFrom for one signature')
     ok('[race-condition regression] claimPaymentNonce rejects a concurrent duplicate claim on the same nonce')
   }
 
@@ -84,7 +84,7 @@ function run() {
     db.prepare("UPDATE nonces SET tx_hash = ? WHERE chain_id = ? AND nonce = ?").run('0xrealtxhash', 4663, nonce1)
     facilitator.releasePaymentNonce(4663, nonce1) // must be a no-op — tx_hash is no longer NULL
     const row = db.prepare('SELECT * FROM nonces WHERE chain_id = ? AND nonce = ?').get(4663, nonce1)
-    assert.ok(row, 'CRITICAL: a real settlement record must never be deleted by releasePaymentNonce')
+    assert.ok(row, 'a real settlement record must never be deleted by releasePaymentNonce')
     assert.strictEqual(row.tx_hash, '0xrealtxhash')
     ok('releasePaymentNonce never deletes a real, already-recorded settlement — only the unsettled placeholder')
   }

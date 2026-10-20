@@ -98,7 +98,7 @@ async function main() {
     const w = await req('POST', '/wallets/create', { label: 'w1' }, AUTH)
     assert.strictEqual(w.status, 201); assert.ok(w.json.address.startsWith('0x')); ok('wallet created')
 
-    // [audit 2026-10 Critical] an ordinary agent key can no longer list/revoke other tenants' keys
+    // an ordinary agent key can no longer list/revoke other tenants' keys
     const victim = await req('POST', '/keys', { label: 'victim' })
     const gl = await req('GET', '/keys', null, AUTH)
     assert.strictEqual(gl.status, 403, 'agent key must not list global keys')
@@ -112,9 +112,9 @@ async function main() {
     assert.strictEqual((await req('GET', '/vault/entries', null, { Authorization: 'Bearer ' + victim.json.key })).status, 401)
     const short = await req('POST', '/vault/entries', { name: 'tiny', value: 'abc' }, AUTH)
     assert.strictEqual(short.status, 400, 'short secrets rejected')
-    ok('[audit] /keys global list/revoke is admin-only; short vault secrets rejected')
+    ok('/keys global list/revoke is admin-only; short vault secrets rejected')
 
-    // [audit phase 2] HTTP-level hardening
+    // HTTP-level hardening
     const big = await req('POST', '/vault/entries', { name: 'big', value: 'x'.repeat(60000) }, AUTH)
     assert.strictEqual(big.status, 413, 'oversized body gets an explicit 413, not a dropped connection')
     const rpcBatch = await req('POST', '/', Array.from({ length: 11 }, () => ({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] })))
@@ -123,7 +123,7 @@ async function main() {
     assert.strictEqual(rpcOverride.status, 400, 'eth_call state overrides rejected')
     const free = await req('POST', '/x402/apis', { path: '/free-route', price: '0' })
     assert.strictEqual(free.status, 400, 'zero-price route rejected')
-    ok('[audit p2] 413 on oversize body; RPC batch/state-override limits; zero-price registry rejected')
+    ok('413 on oversize body; RPC batch/state-override limits; zero-price registry rejected')
 
     // vault/wallet isolation: a second agent key must not see agent 1's
     // secrets or wallets — each is scoped to its owning key, not global.
@@ -354,7 +354,7 @@ async function main() {
     // A real SPL TransferChecked instruction — this gateway's anti-drain
     // guard (assertSafeTx, see solana.js) only allows SPL Token/Token-2022
     // program instructions; a plain SystemProgram transfer is correctly
-    // rejected now (see test/unit/solana.test.js for the dedicated P0
+    // rejected now (see test/unit/solana.test.js for the dedicated
     // regression tests covering that guard directly).
     const transferIx = getTransferCheckedInstruction({ source: buyerTokenAccount.address, mint: solanaMint.address, destination: merchantTokenAccount.address, authority: solanaBuyer, amount: 1000n, decimals: 6 })
     const solanaMessage = kit.pipe(
@@ -374,7 +374,7 @@ async function main() {
     assert.strictEqual(svmSettle.json.success, false)
     assert.ok(/Solana settle error/.test(svmSettle.json.errorReason), `expected the co-sign step to reach the actual devnet RPC and fail there (fake blockhash/unfunded account), got: ${svmSettle.json.errorReason}`); ok('POST /x402/solana/settle co-signs with the configured fee payer and attempts a real devnet broadcast (fails on fake blockhash/unfunded test account, as expected)')
 
-    // P0 regression at the HTTP layer too: a smuggled SystemProgram
+    // Also enforced at the HTTP layer: a smuggled SystemProgram
     // instruction alongside this same legit payment must be rejected by
     // the live endpoint, not just the unit-level function.
     const { getTransferSolInstruction } = require('@solana-program/system')
@@ -389,8 +389,8 @@ async function main() {
     const drainPartiallySigned = await kit.partiallySignTransactionMessageWithSigners(drainMessage)
     const drainBase64Tx = kit.getBase64EncodedWireTransaction(drainPartiallySigned)
     const drainVerify = await req('POST', '/x402/solana/verify', { transaction: drainBase64Tx })
-    assert.strictEqual(drainVerify.status, 400, 'CRITICAL: a transaction smuggling a fee-payer-draining instruction alongside a real payment must be rejected over HTTP, not just at the unit level')
-    assert.ok(/non-allowlisted program/.test(drainVerify.json.error)); ok('[P0 regression, HTTP layer] POST /x402/solana/verify rejects a real payment transaction that also smuggles a fee-payer-draining instruction')
+    assert.strictEqual(drainVerify.status, 400, 'a transaction smuggling a fee-payer-draining instruction alongside a real payment must be rejected over HTTP, not just at the unit level')
+    assert.ok(/non-allowlisted program/.test(drainVerify.json.error)); ok('POST /x402/solana/verify rejects a real payment transaction that also smuggles a fee-payer-draining instruction')
 
     console.log(`\nSMOKE PASS — ${pass} checks`)
   } finally {

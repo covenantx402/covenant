@@ -1,4 +1,4 @@
-// Regression tests for the 2026-10 security audit. Each block names the finding it locks down.
+// Hardening tests: receipt binding, pending settlement, key isolation, vault key requirements.
 'use strict'
 const assert = require('assert')
 const fs = require('fs')
@@ -6,7 +6,7 @@ const os = require('os')
 const path = require('path')
 const { Wallet } = require('ethers')
 
-process.env.COVENANT_DB_PATH = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'covenant-audit-')), 'gateway.db')
+process.env.COVENANT_DB_PATH = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'covenant-hardening-')), 'gateway.db')
 process.env.COVENANT_SETTLE_KEY = '0x' + '11'.repeat(32)
 process.env.COVENANT_VAULT_KEY = 'unit-test-vault-key-0123456789abcdef'
 process.env.COVENANT_RPC_UPSTREAM = 'http://127.0.0.1:1'
@@ -136,6 +136,6 @@ async function run() {
     ok('[F5b] vault module refuses to load without a real COVENANT_VAULT_KEY (no derived fallback)')
   }
 
-  console.log(`\nUNIT PASS (audit-2026-10) — ${pass} checks`)
+  console.log(`\nUNIT PASS (hardening-core) — ${pass} checks`)
 }
 run().catch(e => { console.error(e); process.exit(1) })

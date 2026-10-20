@@ -33,7 +33,7 @@
     "build": "tsc -p .",
     "lint": "eslint src",
     "pretest": "npm run build",
-    "test": "node test/audit.test.mjs"
+    "test": "node test/paywall-hardening.test.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",

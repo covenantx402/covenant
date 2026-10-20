@@ -142,7 +142,7 @@ const cfg = (o = {}) => loadConfig({ COVENANT_GATEWAY: GW, COVENANT_FACILITATOR:
   ok('wallet_create: disabled by default; private key + mnemonic written to a mode-600 file and never returned')
 }
 
-// 8b. hostile / malformed gateway responses (review findings): redirects, amounts, shapes, filenames, injected text
+// 8b. hostile / malformed gateway responses (hostile gateway responses): redirects, amounts, shapes, filenames, injected text
 {
   const resp = (st, b) => ({ status: st, headers: new Headers(), text: async () => JSON.stringify(b) })
   // never follow redirects: a 30x must not carry the bearer token or X-PAYMENT elsewhere

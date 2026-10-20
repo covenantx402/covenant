@@ -1,5 +1,5 @@
 // test/unit/clientip-trust.test.js — regression test for a rate-limit
-// bucket-sharing gap found during security audit: when the gateway is
+// bucket-sharing gap scenario: when the gateway is
 // fronted by a reverse proxy/tunnel (Cloudflare Tunnel's cloudflared
 // connects via plain loopback), req.socket.remoteAddress is the SAME for
 // every real-world client. Without COVENANT_TRUSTED_PROXIES configured,
