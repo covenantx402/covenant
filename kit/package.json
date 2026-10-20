@@ -1,7 +1,7 @@
 {
   "name": "@covenantx402/x402-kit",
   "version": "1.1.0",
-  "description": "COVENANT x402 paywall middleware — monetize any endpoint with USDG settlement on Robinhood Chain 4663",
+  "description": "COVENANT x402 paywall middleware \u2014 monetize any endpoint with USDG settlement on Robinhood Chain 4663",
   "keywords": [
     "x402",
     "paywall",
@@ -32,7 +32,8 @@
   "scripts": {
     "build": "tsc -p .",
     "lint": "eslint src",
-    "pretest": "npm run build"
+    "pretest": "npm run build",
+    "test": "node test/audit.test.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",

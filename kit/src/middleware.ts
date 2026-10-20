@@ -17,12 +17,25 @@ import {
 const X402_VERSION = 1;
 /** USDC has 6 decimals on every supported network. */
 const USDC_DECIMALS = 6;
+// Used/in-flight payment nonces (kept for the process lifetime, bounded). Per-process: run one instance or
+// share this via the facilitator, which also enforces nonce uniqueness on its side.
+const usedNonces = new Set<string>();
+const NONCE_CAP = 100_000;
+function claimNonce(k: string): boolean {
+  if (usedNonces.has(k)) return false;
+  if (usedNonces.size >= NONCE_CAP) usedNonces.delete(usedNonces.values().next().value as string);
+  usedNonces.add(k);
+  return true;
+}
+function releaseNonce(k: string): void { usedNonces.delete(k); }
 const WEBHOOK_MAX_ATTEMPTS = 3;
 const WEBHOOK_BASE_DELAY_MS = 250;
 
-function signWebhookBody(body: string, secret: string): string {
-  return "sha256=" + createHmac("sha256", secret).update(body).digest("hex");
+function signWebhookBody(body: string, secret: string, ts?: string): string {
+  // With a timestamp the signature covers `${ts}.${body}` so a captured webhook cannot be replayed later.
+  return "sha256=" + createHmac("sha256", secret).update(ts ? `${ts}.${body}` : body).digest("hex");
 }
+const WEBHOOK_MAX_SKEW_MS = 5 * 60 * 1000;
 
 /**
  * Verify an inbound webhook signature header (for receivers built with
@@ -33,9 +46,16 @@ export function verifyWebhookSignature(
   rawBody: string,
   signatureHeader: string | undefined,
   secret: string,
+  timestampHeader?: string,
+  nowMs: number = Date.now(),
 ): boolean {
   if (!signatureHeader) return false;
-  const expected = signWebhookBody(rawBody, secret);
+  // When a timestamp is supplied it must be fresh (anti-replay) and is covered by the signature.
+  if (timestampHeader !== undefined) {
+    const t = Number(timestampHeader);
+    if (!Number.isFinite(t) || Math.abs(nowMs - t) > WEBHOOK_MAX_SKEW_MS) return false;
+  }
+  const expected = signWebhookBody(rawBody, secret, timestampHeader);
   const a = Buffer.from(expected);
   const b = Buffer.from(signatureHeader);
   if (a.length !== b.length) return false;
@@ -48,12 +68,19 @@ async function deliverWebhook(
   secret: string | undefined,
 ): Promise<void> {
   const headers: Record<string, string> = { "content-type": "application/json" };
-  if (secret) headers["x-covenant-signature"] = signWebhookBody(body, secret);
+  if (!/^https:\/\//i.test(url) && !/^http:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/i.test(url)) {
+    throw new Error("settlementWebhook must be https");
+  }
+  if (secret) {
+    const ts = String(Date.now());
+    headers["x-covenant-timestamp"] = ts;
+    headers["x-covenant-signature"] = signWebhookBody(body, secret, ts);
+  }
 
   let lastErr: Error | undefined;
   for (let attempt = 1; attempt <= WEBHOOK_MAX_ATTEMPTS; attempt++) {
     try {
-      const res = await fetch(url, { method: "POST", headers, body });
+      const res = await fetch(url, { method: "POST", headers, body, redirect: "error", signal: AbortSignal.timeout(5000) });
       if (res.ok) return;
       lastErr = new Error(`webhook responded ${res.status}`);
     } catch (err) {
@@ -106,6 +133,19 @@ function buildRequirements(
   };
 }
 
+function validAuthorization(a: unknown): boolean {
+  if (!a || typeof a !== "object") return false;
+  const x = a as Record<string, unknown>;
+  return (
+    typeof x.from === "string" && /^0x[0-9a-fA-F]{40}$/.test(x.from) &&
+    typeof x.to === "string" && /^0x[0-9a-fA-F]{40}$/.test(x.to) &&
+    typeof x.value === "string" && /^\d{1,40}$/.test(x.value) &&
+    (typeof x.validAfter === "string" || typeof x.validAfter === "number") && /^\d{1,20}$/.test(String(x.validAfter)) &&
+    (typeof x.validBefore === "string" || typeof x.validBefore === "number") && /^\d{1,20}$/.test(String(x.validBefore)) &&
+    typeof x.nonce === "string" && /^0x[0-9a-fA-F]{64}$/.test(x.nonce)
+  );
+}
+
 function decodePayload(headerValue: string): PaymentPayload | null {
   try {
     const json = Buffer.from(headerValue, "base64").toString("utf8");
@@ -115,7 +155,8 @@ function decodePayload(headerValue: string): PaymentPayload | null {
       parsed.scheme !== "exact" ||
       typeof parsed.network !== "string" ||
       !parsed.payload?.signature ||
-      !parsed.payload?.authorization
+      !parsed.payload?.authorization ||
+      !validAuthorization(parsed.payload.authorization)
     ) {
       return null;
     }
@@ -145,6 +186,22 @@ function matchAuthorization(
   return { ok: true };
 }
 
+const _canon = new WeakMap<object, Record<string, RoutePricing>>();
+function routeTable(config: PaywallConfig): Record<string, RoutePricing> {
+  let t = _canon.get(config.routes);
+  if (!t) {
+    t = {};
+    for (const [k, v] of Object.entries(config.routes)) {
+      const i = k.indexOf(" ");
+      const m = k.slice(0, i).toUpperCase();
+      const p = k.slice(i + 1);
+      t[`${m} ${(p.length > 1 ? p.replace(/\/+$/, "") : p).toLowerCase()}`] = v;
+    }
+    _canon.set(config.routes, t);
+  }
+  return t;
+}
+
 export interface PaywallMiddlewareDeps {
   config: PaywallConfig;
   logger: UsageLogger;
@@ -159,8 +216,14 @@ export function paywall(deps: PaywallMiddlewareDeps): RequestHandler {
 
   return async (req: Request, res: Response, next: NextFunction) => {
     const startedAt = now();
-    const routeKey = `${req.method.toUpperCase()} ${req.path}`;
-    const pricing = config.routes[routeKey];
+    // Express matches paths case-insensitively and ignores a trailing slash, and runs GET handlers for HEAD.
+    // Canonicalise the same way before the lookup or `/Weather`, `/weather/` and HEAD skip the paywall.
+    const method = req.method.toUpperCase() === "HEAD" ? "GET" : req.method.toUpperCase();
+    let canonPath = req.path;
+    try { canonPath = decodeURIComponent(canonPath); } catch { /* keep raw */ }
+    canonPath = (canonPath.length > 1 ? canonPath.replace(/\/+$/, "") : canonPath).toLowerCase();
+    const routeKey = `${method} ${canonPath}`;
+    const pricing = routeTable(config)[routeKey];
 
     if (!pricing) {
       logger.log({
@@ -178,9 +241,10 @@ export function paywall(deps: PaywallMiddlewareDeps): RequestHandler {
       return next();
     }
 
-    const protocol = (req.headers["x-forwarded-proto"] as string) ?? req.protocol;
+    const publicOrigin = config.publicOrigin;
+    const protocol = req.protocol; // honours Express "trust proxy"; never trust a raw client header
     const host = req.headers.host ?? "localhost";
-    const resourceUrl = `${protocol}://${host}${req.originalUrl}`;
+    const resourceUrl = publicOrigin ? `${publicOrigin.replace(/\/+$/, "")}${req.originalUrl}` : `${protocol}://${host}${req.originalUrl}`;
     const requirements = buildRequirements(pricing, config, resourceUrl);
     const network = requirements.network;
 
@@ -220,69 +284,66 @@ export function paywall(deps: PaywallMiddlewareDeps): RequestHandler {
       );
     }
 
-    const localCheck = matchAuthorization(payload.payload.authorization, requirements);
-    if (!localCheck.ok) {
-      return send402(localCheck.reason);
+    const auth = payload.payload.authorization;
+    const nonceKey = `${network}:${auth.nonce.toLowerCase()}`;
+    if (!claimNonce(nonceKey)) {
+      return send402("payment nonce already used or in flight");
     }
+    let settledOk = false;
+    try {
+      const localCheck = matchAuthorization(auth, requirements);
+      if (!localCheck.ok) return send402(localCheck.reason);
 
-    const verify = await facilitator.verify(payload, requirements);
-    if (!verify.isValid) {
-      return send402(verify.invalidReason ?? "facilitator verification failed");
-    }
-    const payer = verify.payer ?? payload.payload.authorization.from;
+      const verify = await facilitator.verify(payload, requirements);
+      if (!verify.isValid) {
+        return send402(verify.invalidReason ?? "facilitator verification failed");
+      }
+      const payer = verify.payer ?? auth.from;
 
-    res.once("finish", () => {
-      void (async () => {
-        let txHash: string | null = null;
-        let status: "paid" | "rejected" = "paid";
-        let reason: string | null = null;
-        try {
-          const settle = await facilitator.settle(payload, requirements);
-          if (!settle.success) {
-            status = "rejected";
-            reason = settle.errorReason ?? "facilitator settlement failed";
-          } else {
-            txHash = settle.transaction ?? null;
-            if (config.settlementWebhook) {
-              try {
-                const body = JSON.stringify({
-                  route: req.path,
-                  method: req.method,
-                  payer,
-                  amountUsd: pricing.price,
-                  network,
-                  txHash,
-                  timestamp: startedAt,
-                });
-                await deliverWebhook(
-                  config.settlementWebhook,
-                  body,
-                  config.settlementWebhookSecret,
-                );
-              } catch (err) {
-                reason = `webhook error: ${(err as Error).message}`;
-              }
-            }
-          }
-        } catch (err) {
-          status = "rejected";
-          reason = `settle threw: ${(err as Error).message}`;
-        }
+      // Settle BEFORE delivering. Previously settlement ran after the response finished and its failure was
+      // swallowed, so a replayed/unfundable header got the resource for free.
+      let txHash: string | null = null;
+      const settle = await facilitator.settle(payload, requirements);
+      if (!settle.success) {
+        return send402(settle.errorReason ?? "facilitator settlement failed");
+      }
+      settledOk = true;
+      txHash = settle.transaction ?? null;
+      res.setHeader("X-PAYMENT-RESPONSE", Buffer.from(JSON.stringify({ success: true, transaction: txHash, network, payer })).toString("base64"));
 
-        logger.log({
-          timestamp: startedAt,
+      logger.log({
+        timestamp: startedAt,
+        route: req.path,
+        method: req.method,
+        payer,
+        amountUsd: pricing.price,
+        network,
+        status: "paid",
+        reason: null,
+        txHash,
+        responseMs: now() - startedAt,
+      });
+
+      if (config.settlementWebhook) {
+        const body = JSON.stringify({
           route: req.path,
           method: req.method,
           payer,
           amountUsd: pricing.price,
           network,
-          status,
-          reason,
           txHash,
-          responseMs: now() - startedAt,
+          timestamp: startedAt,
         });
-      })();
-    });
+        void deliverWebhook(config.settlementWebhook, body, config.settlementWebhookSecret).catch((err) => {
+          logger.log({ timestamp: startedAt, route: req.path, method: req.method, payer, amountUsd: pricing.price, network, status: "paid", reason: `webhook error: ${(err as Error).message}`, txHash, responseMs: now() - startedAt });
+        });
+      }
+    } catch (err) {
+      return send402(`payment processing failed: ${(err as Error).message}`);
+    } finally {
+      // A settled nonce stays consumed (replay guard); a failed one is released so a legit retry works.
+      if (!settledOk) releaseNonce(nonceKey);
+    }
 
     next();
   };

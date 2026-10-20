@@ -199,6 +199,7 @@ function setReservedSlugCheck(fn) { reservedSlugCheck = fn }
 function usedSlugsExternal(slug) { return reservedSlugCheck(slug) }
 
 /* ---------- fee math (atomic USDG = 6 decimals) ---------- */
+const MIN_LISTING_ATOMIC = 10000n // 0.01 USDG
 function splitPrice(price) {
   const [w, f = ''] = String(price).split('.')
   const atomic = BigInt((w + (f + '000000').slice(0, 6)).replace(/^0+(?=\d)/, '') || '0')
@@ -206,40 +207,65 @@ function splitPrice(price) {
   const fee = atomic * BigInt(FEE_BPS) / 10000n
   const sellerShare = atomic - fee
   if (sellerShare <= 0n) throw new Error('price too small to split after fee')
+  if (atomic < MIN_LISTING_ATOMIC) throw new Error('price must be at least 0.01 USDG (below that the fee rounds to zero and settlement gas exceeds revenue)')
   return { atomic, fee, sellerShare }
 }
 
 /* ---------- SSRF guard: only public https JSON endpoints ---------- */
-const PRIVATE_V4 = [/^10\./, /^127\./, /^169\.254\./, /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./, /^0\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./]
+// Strict allowlist approach (audit phase 2): an address is usable ONLY if net.isIP() accepts it AND it is
+// global unicast. Every IPv6 form embedding an IPv4 (mapped, compat, NAT64, 6to4, Teredo) is judged on the
+// embedded IPv4. Anything we cannot parse is private.
+const net = require('net')
+function v4ToInt(ip) { const p = ip.split('.').map(Number); return ((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]) >>> 0 }
+function inV4(ip, base, bits) { const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0; return (v4ToInt(ip) & mask) === (v4ToInt(base) & mask) }
+const V4_BLOCKS = [['0.0.0.0',8],['10.0.0.0',8],['100.64.0.0',10],['127.0.0.0',8],['169.254.0.0',16],['172.16.0.0',12],['192.0.0.0',24],['192.0.2.0',24],['192.88.99.0',24],['192.168.0.0',16],['198.18.0.0',15],['198.51.100.0',24],['203.0.113.0',24],['224.0.0.0',4],['240.0.0.0',4]]
 function isPrivateIp(ip) {
-  if (!ip) return true
-  if (ip.includes(':')) { // IPv6
-    const v = ip.toLowerCase()
-    if (v === '::1' || v.startsWith('fe80') || v.startsWith('fc') || v.startsWith('fd') || v.startsWith('::ffff:')) return true
-    const mapped = v.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/)
-    if (mapped) return isPrivateIp(mapped[1])
-    return false
-  }
-  return PRIVATE_V4.some(re => re.test(ip))
+  if (!ip || typeof ip !== 'string') return true
+  ip = ip.replace(/^\[|\]$/g, '').split('%')[0]
+  const kind = net.isIP(ip)
+  if (kind === 4) return V4_BLOCKS.some(([b, n]) => inV4(ip, b, n))
+  if (kind !== 6) return true
+  const v = ip.toLowerCase()
+  const dotted = v.match(/(\d+\.\d+\.\d+\.\d+)$/)                      // ::ffff:1.2.3.4, ::1.2.3.4, 64:ff9b::1.2.3.4
+  if (dotted) return isPrivateIp(dotted[1])
+  // expand to 8 hextets
+  let [head, tail] = v.split('::'); const h = head ? head.split(':') : [], t = tail !== undefined && tail ? tail.split(':') : []
+  const full = tail === undefined ? h : [...h, ...Array(8 - h.length - t.length).fill('0'), ...t]
+  if (full.length !== 8) return true
+  const g = full.map(x => parseInt(x || '0', 16))
+  const emb = (hi, lo) => `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`
+  if (g.every(x => x === 0) || (g.slice(0, 7).every(x => x === 0) && g[7] === 1)) return true      // :: and ::1
+  if (g.slice(0, 5).every(x => x === 0) && (g[5] === 0xffff || g[5] === 0)) return isPrivateIp(emb(g[6], g[7])) // mapped / compat
+  if (g[0] === 0x64 && g[1] === 0xff9b) return isPrivateIp(emb(g[6], g[7]))                         // NAT64
+  if (g[0] === 0x2002) return isPrivateIp(emb(g[1], g[2]))                                          // 6to4
+  if (g[0] === 0x2001 && g[1] === 0) return true                                                    // Teredo
+  if ((g[0] & 0xfe00) === 0xfc00 || (g[0] & 0xffc0) === 0xfe80 || (g[0] & 0xff00) === 0xff00) return true // ULA, link-local, multicast
+  if (g[0] === 0x2001 && g[1] === 0xdb8) return true                                                // documentation
+  return !((g[0] & 0xe000) === 0x2000)                                                              // only 2000::/3 is global unicast
 }
 
-async function assertSafeUpstream(rawUrl) {
+const LOOPBACK_OK = () => process.env.COVENANT_ALLOW_LOOPBACK_UPSTREAM === '1' // staging tests only
+
+/** Validate a URL AND resolve it once. Returns { url, address, family } to pin the connection to. */
+async function resolveSafeUpstream(rawUrl) {
   let u
   try { u = new URL(rawUrl) } catch { throw new Error('upstream must be a valid URL') }
-  const loopbackOk = process.env.COVENANT_ALLOW_LOOPBACK_UPSTREAM === '1' // staging tests only
-  if (u.protocol !== 'https:' && !(loopbackOk && u.protocol === 'http:' && /^(127\.|::1|localhost)/.test(u.hostname))) throw new Error('upstream must be https')
+  const loopbackOk = LOOPBACK_OK()
+  const hostIsLoop = /^(127\.|\[?::1\]?$|localhost$)/.test(u.hostname)
+  if (u.protocol !== 'https:' && !(loopbackOk && u.protocol === 'http:' && hostIsLoop)) throw new Error('upstream must be https')
   if (u.username || u.password) throw new Error('upstream URL must not embed credentials')
-  const host = u.hostname
-  if (/^(.*\.local|.*\.internal|metadata\.)$/i.test(host)) throw new Error('upstream host not allowed')
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+  const host = u.hostname.replace(/^\[|\]$/g, '')
+  if (/(^|\.)(local|localhost|internal|localdomain|lan|home\.arpa)$/i.test(host) && !(loopbackOk && hostIsLoop)) throw new Error('upstream host not allowed')
+  if (net.isIP(host)) {
     if (isPrivateIp(host) && !loopbackOk) throw new Error('upstream must be a public address')
-    return u
+    return { url: u, address: host, family: net.isIP(host) }
   }
   const addrs = await dns.promises.lookup(host, { all: true })
   if (!addrs.length) throw new Error('upstream host does not resolve')
   if (addrs.some(a => isPrivateIp(a.address)) && !loopbackOk) throw new Error('upstream resolves to a private address')
-  return u
+  return { url: u, address: addrs[0].address, family: addrs[0].family }
 }
+async function assertSafeUpstream(rawUrl) { return (await resolveSafeUpstream(rawUrl)).url }
 
 /* ---------- listing / revoke ---------- */
 function verifyIntent(intent, signature, types) {
@@ -248,6 +274,7 @@ function verifyIntent(intent, signature, types) {
   if (!intent || typeof intent !== 'object') throw new Error('bad intent')
   if (!/^0x[0-9a-fA-F]{130,132}$/.test(String(signature || ''))) throw new Error('signature must be a 65-byte hex signature')
   if (!/^0x[0-9a-fA-F]{64}$/.test(String(intent.nonce || ''))) throw new Error('nonce must be bytes32')
+  intent.nonce = String(intent.nonce).toLowerCase()
   if (stmts.nonceSeen.get(intent.nonce)) throw new Error('intent nonce already used')
   const vb = BigInt(intent.validBefore || 0), va = BigInt(intent.validAfter || 0)
   if (vb <= BigInt(now)) throw new Error('intent expired')
@@ -282,7 +309,7 @@ async function createListing({ name, description, upstream, price, seller, signa
   verifyIntent({ seller, name: String(name), upstream: String(upstream), price: String(price),
     planCalls: String(planRec ? planRec.calls : 0), planPrice: planRec ? planRec.price : '0',
     validAfter: validAfter || 0, validBefore, nonce }, signature, LISTING_TYPES)
-  stmts.nonceInsert.run(nonce, Date.now())
+  stmts.nonceInsert.run(String(nonce).toLowerCase(), Date.now())
 
   const slug = uniqueSlug(slugify(name))
   // Phase-1 guard: probe the seller's endpoint once. A listing that can't
@@ -303,8 +330,10 @@ async function createListing({ name, description, upstream, price, seller, signa
 function revoke({ slug, seller, signature, nonce, validAfter, validBefore }) {
   const row = stmts.getListing.get(String(slug))
   if (!row || row.status !== 'active') throw new Error('listing not found or already delisted')
+  // Only the listing's own seller may delist it (audit phase 2: any wallet could delist any listing).
+  if (String(seller || '').toLowerCase() !== String(row.seller || '').toLowerCase()) throw new Error('not the listing owner')
   verifyIntent({ seller, slug: String(slug), validAfter: validAfter || 0, validBefore, nonce }, signature, REVOKE_TYPES)
-  stmts.nonceInsert.run(nonce, Date.now())
+  stmts.nonceInsert.run(String(nonce).toLowerCase(), Date.now())
   stmts.delist.run(Date.now(), String(slug))
   return rowToListing(stmts.getListing.get(slug))
 }
@@ -401,17 +430,21 @@ function requirement(rec, resource, spender) {
 }
 
 /* ---------- upstream fetch (post-payment delivery) ---------- */
-function fetchJson(urlStr, timeoutMs = 8000, depth = 0, extraHeaders) {
+async function fetchJson(urlStr, timeoutMs = 8000, depth = 0, extraHeaders) {
+  const { url: u, address, family } = await resolveSafeUpstream(urlStr)       // validates THIS hop
   return new Promise((resolve, reject) => {
-    const lib = String(urlStr).startsWith('http:') ? http : https
+    const lib = u.protocol === 'http:' ? http : https
     const headers = { accept: 'application/json', 'user-agent': 'COVENANT-marketplace/1.0', ...(extraHeaders || {}) }
-    lib.get(urlStr, { headers, timeout: timeoutMs }, res => {
-      if (res.statusCode >= 301 && res.statusCode <= 308 && res.headers.location && depth < 2) {
+    // lookup() is pinned to the address we just validated: DNS cannot change between check and connect.
+    const lookup = (_h, _o, cb) => (_o && _o.all) ? cb(null, [{ address, family }]) : cb(null, address, family)
+    const req = lib.get(u, { headers, timeout: timeoutMs, lookup }, res => {
+      if (res.statusCode >= 301 && res.statusCode <= 308 && res.headers.location) {
         res.resume()
-        const next = new URL(res.headers.location, urlStr)
-        // Private headers must never follow a redirect to a different host.
-        const carry = next.host === new URL(urlStr).host ? extraHeaders : undefined
-        resolve(fetchJson(next.toString(), timeoutMs, depth + 1, carry))
+        if (depth >= 2) { reject(new Error('too many redirects')); return }
+        let next
+        try { next = new URL(res.headers.location, u) } catch { reject(new Error('bad redirect')); return }
+        const carry = next.host === u.host ? extraHeaders : undefined          // never leak seller secrets cross-host
+        fetchJson(next.toString(), timeoutMs, depth + 1, carry).then(resolve, reject)  // re-validated on entry
         return
       }
       if (res.statusCode !== 200) { res.resume(); reject(new Error('upstream HTTP ' + res.statusCode)); return }
@@ -420,13 +453,15 @@ function fetchJson(urlStr, timeoutMs = 8000, depth = 0, extraHeaders) {
       res.on('end', () => {
         try { resolve(JSON.parse(out)) } catch { reject(new Error('upstream did not return valid JSON')) }
       })
-    }).on('error', reject).on('timeout', function () { this.destroy(new Error('upstream timeout')) })
+      res.on('error', reject)
+    })
+    req.on('error', reject).on('timeout', function () { this.destroy(new Error('upstream timeout')) })
   })
 }
 
 module.exports = {
   createListing, revoke, get, catalog, recordHit, recordFail, recordRefund, recordSettle, earningsFor, reputationOf,
-  fetchJson, assertSafeUpstream, splitPrice, setReservedSlugCheck, requirement,
+  fetchJson, assertSafeUpstream, isPrivateIp, exists: (slug) => !!stmts.getListing.get(String(slug)), splitPrice, setReservedSlugCheck, requirement,
   getSub, grantSub, consumeSub, refundSub, subsView,
   privateHeadersFor: (rec) => (rec && rec.privateHeadersEnc ? decryptHeaders(rec.privateHeadersEnc) : null),
   DOMAIN, LISTING_TYPES, REVOKE_TYPES, FEE_BPS,
