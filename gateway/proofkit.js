@@ -74,7 +74,7 @@ function uptimeView(daysIn, now = Date.now()) {
   }
   return {
     since: first == null ? null : new Date(first).toISOString(), intervalSec: SAMPLE_EVERY_MS / 1000,
-    note: 'Availability is measured by this gateway sampling itself and the chain RPC once a minute. Minutes with no sample (restarts, outages) count against the gateway figure. Days before recording started show no data.',
+    note: 'Availability is measured by this gateway sampling itself and the chain RPC once a minute. Minutes with no sample (restarts, deploys, outages) count against the gateway figure.',
     days: out,
     overall: expectedAll ? { gatewayPct: Math.round((Math.min(n, expectedAll) / expectedAll) * 10000) / 100, rpcPct: n ? Math.round((ok / n) * 10000) / 100 : null, samples: n, expected: expectedAll } : null,
   }
