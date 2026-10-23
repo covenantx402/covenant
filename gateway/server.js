@@ -3,6 +3,8 @@
 // Never forwards arbitrary RPC methods; upstream RPC comes from env, never shipped to clients.
 const http = require('http')
 const https = require('https')
+const fs = require('fs')
+const path = require('path')
 const x402r = require('./x402-routes')
 const dataProviders = require('./data-providers.js')
 const vault = require('./agent-vault')
@@ -1351,6 +1353,19 @@ const server = http.createServer(async (req, res) => {
   // classify generic transfers to/from the facilitator wallet as settlements.
   if (req.method === 'GET' && url === '/x402/audit/settlements') {
     send(res, 200, facilitator.settlementAudit())
+    return
+  }
+
+  // The weekly snapshot is generated locally from the public settlement audit
+  // and written atomically by scripts/write-audit-snapshot.py. It is a stable
+  // proof artifact; the live audit endpoint above remains the current source.
+  if (req.method === 'GET' && url === '/x402/audit/snapshot/latest') {
+    const snapshotPath = path.join(__dirname, 'data', 'audit-snapshots', 'latest.json')
+    try {
+      send(res, 200, JSON.parse(fs.readFileSync(snapshotPath, 'utf8')))
+    } catch {
+      send(res, 404, { error: 'weekly audit snapshot has not been generated yet' })
+    }
     return
   }
 
