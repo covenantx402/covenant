@@ -1347,6 +1347,13 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  // Settlement-only, hash-level audit export. This intentionally does not
+  // classify generic transfers to/from the facilitator wallet as settlements.
+  if (req.method === 'GET' && url === '/x402/audit/settlements') {
+    send(res, 200, facilitator.settlementAudit())
+    return
+  }
+
   if (req.url === '/x402/stats') {
     const acts = x402r.activity
     const now = Date.now()

@@ -13,7 +13,11 @@ const stmts = {
   update: db.prepare('UPDATE reputation SET last_seen=?, settled_count=?, total_usdg=?, resources=?, txs=? WHERE address=?'),
   top: db.prepare('SELECT address FROM reputation ORDER BY settled_count DESC, total_usdg DESC LIMIT ?'),
   count: db.prepare('SELECT COUNT(*) AS n FROM reputation'),
-  totalSettled: db.prepare('SELECT COALESCE(SUM(settled_count), 0) AS n FROM reputation'),
+  // Reputation is a derived, per-payer projection. It can lag a successful
+  // settlement if the process dies after recording the immutable ledger row
+  // but before this projection updates. Public aggregate settlement counts
+  // must therefore come from the settlement ledger, never this projection.
+  ledgerSettled: db.prepare('SELECT COUNT(*) AS n FROM settlements'),
 }
 
 function record(payer, { valueFormatted, resource, txHash } = {}) {
@@ -75,7 +79,7 @@ function leaderboard(limit = 10) {
 }
 
 function stats() {
-  return { knownAgents: stmts.count.get().n, totalSettlements: stmts.totalSettled.get().n }
+  return { knownAgents: stmts.count.get().n, totalSettlements: stmts.ledgerSettled.get().n }
 }
 
 module.exports = { record, score, leaderboard, stats }

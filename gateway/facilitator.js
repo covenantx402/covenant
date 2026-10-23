@@ -245,6 +245,67 @@ function publicViewAll() {
   return chains.listChains().map(c => publicView(c.id))
 }
 
+/**
+ * A reproducible, settlement-only export for independent verification.
+ *
+ * It deliberately reads the facilitator's successful settlement ledger, not
+ * generic ERC-20 transfer history: payouts, refunds, and operational wallet
+ * movements are different events and must not inflate settlement usage.
+ */
+function settlementAudit(chainId = DEFAULT_CHAIN_ID) {
+  const id = Number(chainId)
+  const c = chains.getChain(id)
+  // The ledger statement is intentionally bounded; 100,000 is comfortably
+  // above the current operating history while keeping this public export
+  // bounded under pathological growth.
+  const currentFacilitator = String(settlementWallet(id)?.address || '').toLowerCase()
+  const rows = stmts.settleRecentAllChains.all(100000)
+    .filter(row => row.chain_id === id)
+    .map(rowToSettleRecord)
+    .map(r => {
+      const payer = String(r.payer).toLowerCase()
+      const payTo = String(r.to).toLowerCase()
+      const category = payTo !== currentFacilitator
+        ? 'legacy-or-other-facilitator'
+        : payer === currentFacilitator ? 'facilitator-self-payer' : 'external-payer'
+      return {
+        t: r.t,
+        txHash: r.txHash,
+        payer: r.payer,
+        payTo: r.to,
+        value: r.value,
+        valueFormatted: r.valueFormatted,
+        resource: r.resource || null,
+        gasUsed: r.gasUsed || null,
+        category,
+      }
+    })
+  const summarize = category => {
+    const matching = rows.filter(r => r.category === category)
+    return {
+      count: matching.length,
+      total: Math.round(matching.reduce((sum, r) => sum + Number(r.valueFormatted || 0), 0) * 1e6) / 1e6,
+    }
+  }
+  return {
+    chainId: id,
+    chainName: c.name,
+    asset: c.usdc,
+    assetSymbol: c.usdcSymbol,
+    currentFacilitator: currentFacilitator || null,
+    source: 'facilitator successful-settlement ledger',
+    methodology: 'Rows are successful facilitator settlement records only. Generic token transfers, seller payouts, refunds, and operational wallet activity are excluded. Records directed to a historical or other facilitator are kept separate from the current facilitator totals.',
+    totals: {
+      count: rows.length,
+      total: Math.round(rows.reduce((sum, r) => sum + Number(r.valueFormatted || 0), 0) * 1e6) / 1e6,
+      externalPayer: summarize('external-payer'),
+      facilitatorSelfPayer: summarize('facilitator-self-payer'),
+      legacyOrOtherFacilitator: summarize('legacy-or-other-facilitator'),
+    },
+    rows,
+  }
+}
+
 /** Operational readiness for a chain. A chain can be configured and its RPC
  * live while the settlement wallet has no native gas — accepting a payment
  * challenge in that state would be misleading because transferFrom cannot
@@ -848,7 +909,7 @@ const _test = { normNonce, _providers, finalizeSettlement, resolvePending, stmts
 
 module.exports = {
   _test,
-  verify, settle, publicView, publicViewAll, chainReadiness, paymentRecordFor, claimReceipt, settleLogAll,
+  verify, settle, publicView, publicViewAll, settlementAudit, chainReadiness, paymentRecordFor, claimReceipt, settleLogAll,
   isConfigured,
   finalizeSplits, cancelSplits, currentBlock, refundPayment, payout, claimNonce, releaseNonce,
   claimChannel, reconcilePending, inspectTx, retryFailedSplits, retryRefundsDue, markRefundDue, clearRefundDue, normNonce,
