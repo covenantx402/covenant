@@ -461,7 +461,7 @@ async function fetchJson(urlStr, timeoutMs = 8000, depth = 0, extraHeaders) {
 
 module.exports = {
   createListing, revoke, get, catalog, recordHit, recordFail, recordRefund, recordSettle, earningsFor, reputationOf,
-  fetchJson, assertSafeUpstream, isPrivateIp, exists: (slug) => !!stmts.getListing.get(String(slug)), splitPrice, setReservedSlugCheck, requirement,
+  fetchJson, assertSafeUpstream, sanitizePrivateHeaders, isPrivateIp, exists: (slug) => !!stmts.getListing.get(String(slug)), splitPrice, setReservedSlugCheck, requirement,
   getSub, grantSub, consumeSub, refundSub, subsView,
   privateHeadersFor: (rec) => (rec && rec.privateHeadersEnc ? decryptHeaders(rec.privateHeadersEnc) : null),
   DOMAIN, LISTING_TYPES, REVOKE_TYPES, FEE_BPS,

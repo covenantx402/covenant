@@ -28,6 +28,7 @@
 const { ethers } = require('ethers')
 const db = require('./db')
 const chains = require('./chains')
+const demoWallet = require('./demo-wallet')
 
 const DEFAULT_CHAIN_ID = chains.DEFAULT_CHAIN_ID
 const DOMAIN_NAME = 'COVENANT'
@@ -268,9 +269,13 @@ function settlementAudit(chainId = DEFAULT_CHAIN_ID) {
       // payer === payTo is a wallet paying itself: a self-test, whichever
       // facilitator address it was. Only a payment to a different address
       // from the payer that is not the current facilitator is "other".
-      const category = payer === payTo
-        ? (payTo === currentFacilitator ? 'self-test-current' : 'self-test-legacy')
-        : payTo !== currentFacilitator ? 'other-facilitator' : 'external-payer'
+      // The public "Run a live payment" demo is paid by a wallet WE control, so it is
+      // always a self-test: it must never be able to inflate the external-payer count.
+      const category = payer === demoWallet.address()
+        ? 'self-test-demo'
+        : payer === payTo
+          ? (payTo === currentFacilitator ? 'self-test-current' : 'self-test-legacy')
+          : payTo !== currentFacilitator ? 'other-facilitator' : 'external-payer'
       return {
         t: r.t,
         txHash: r.txHash,
@@ -303,8 +308,8 @@ function settlementAudit(chainId = DEFAULT_CHAIN_ID) {
       total: Math.round(rows.reduce((sum, r) => sum + Number(r.valueFormatted || 0), 0) * 1e6) / 1e6,
       externalPayer: summarize('external-payer'),
       selfTest: (() => {
-        const cur = summarize('self-test-current'), old = summarize('self-test-legacy')
-        return { count: cur.count + old.count, total: Math.round((cur.total + old.total) * 1e6) / 1e6, current: cur, legacy: old }
+        const cur = summarize('self-test-current'), old = summarize('self-test-legacy'), demo = summarize('self-test-demo')
+        return { count: cur.count + old.count + demo.count, total: Math.round((cur.total + old.total + demo.total) * 1e6) / 1e6, current: cur, legacy: old, demo }
       })(),
       otherFacilitator: summarize('other-facilitator'),
     },
@@ -917,7 +922,7 @@ module.exports = {
   _test,
   verify, settle, publicView, publicViewAll, settlementAudit, chainReadiness, paymentRecordFor, claimReceipt, settleLogAll,
   isConfigured,
-  finalizeSplits, cancelSplits, currentBlock, refundPayment, payout, claimNonce, releaseNonce,
+  finalizeSplits, cancelSplits, currentBlock, provider, refundPayment, payout, claimNonce, releaseNonce,
   claimChannel, reconcilePending, inspectTx, retryFailedSplits, retryRefundsDue, markRefundDue, clearRefundDue, normNonce,
   claimPaymentNonce, releasePaymentNonce, // exported for the dedicated race-condition regression unit test
   domainFor, INTENT_TYPES,

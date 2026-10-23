@@ -13,6 +13,8 @@ const crypto = require('crypto')
 const keys = require('./keys')
 const facilitator = require('./facilitator')
 const marketplace = require('./marketplace')
+const proofkit = require('./proofkit')
+const demoWallet = require('./demo-wallet')
 const balance = require('./balance')
 const { ethers } = require('ethers')
 const { DOMAIN_NAME, DOMAIN_VERSION } = require('./facilitator')
@@ -377,6 +379,26 @@ function isAdmin(req) {
 }
 
 const articleCache = new Map() // url -> {t, json}
+
+/* Live-demo dependencies. Lazy: nothing is created, and no key is read, unless the demo is used. */
+let _demo
+function demoDeps() {
+  if (_demo) return _demo
+  // COVENANT_RPC_UPSTREAM may list several comma-separated URLs; the facilitator already knows how to fail over between them.
+  const prov = facilitator.provider(facilitator.CHAIN_ID)
+  const pk = demoWallet.privateKey()
+  const wallet = pk ? new ethers.Wallet(pk, prov) : null
+  const token = new ethers.Contract(facilitator.USDG, proofkit.ERC20, wallet || prov)
+  const call = (method, p, body, headers) => new Promise((resolve, reject) => {
+    const data = body ? JSON.stringify(body) : null
+    const r = http.request({ host: '127.0.0.1', port: PORT, path: p, method, headers: { 'content-type': 'application/json', ...(headers || {}), ...(data ? { 'content-length': Buffer.byteLength(data) } : {}) } }, resp => {
+      let out = ''; resp.on('data', c => { out += c }); resp.on('end', () => { let j = null; try { j = JSON.parse(out) } catch { /* not json */ } resolve({ status: resp.statusCode, json: j }) })
+    })
+    r.on('error', reject); r.setTimeout(60000, () => r.destroy(new Error('self-call timeout'))); if (data) r.write(data); r.end()
+  })
+  _demo = { wallet, token, call, usdg: facilitator.USDG, domain: facilitator.DOMAIN, types: facilitator.INTENT_TYPES, limit: ratelimit.check }
+  return _demo
+}
 
 const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*')
@@ -1349,6 +1371,67 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  // ============ proofkit: tx lookup, receipt card, badge, uptime, live demo, listing probe ============
+  const sendSvg = (svg) => { res.statusCode = 200; res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8'); res.setHeader('Cache-Control', 'public, max-age=300'); res.end(svg) }
+
+  if (req.method === 'GET' && url.startsWith('/x402/tx/')) {
+    const h = decodeURIComponent(url.slice('/x402/tx/'.length))
+    if (!proofkit.HASH.test(h)) { send(res, 400, { error: 'expected a 0x-prefixed 32-byte transaction hash' }); return }
+    send(res, 200, proofkit.txView(h, () => facilitator.settlementAudit()))
+    return
+  }
+  if (req.method === 'GET' && url.startsWith('/x402/receipt/') && url.endsWith('.svg')) {
+    const h = decodeURIComponent(url.slice('/x402/receipt/'.length, -4))
+    if (!proofkit.HASH.test(h)) { send(res, 400, { error: 'bad transaction hash' }); return }
+    const v = proofkit.txView(h, () => facilitator.settlementAudit())
+    if (!v.found) { send(res, 404, { error: 'not a settlement in the COVENANT ledger' }); return }
+    sendSvg(proofkit.receiptSvg(v.row)); return
+  }
+  if (req.method === 'GET' && url.startsWith('/x402/badge/') && url.endsWith('.svg')) {
+    const slug = decodeURIComponent(url.slice('/x402/badge/'.length, -4))
+    if (!proofkit.SLUG.test(slug)) { send(res, 400, { error: 'bad slug' }); return }
+    sendSvg(proofkit.badgeFor(slug, () => facilitator.settlementAudit(), s2 => x402r.has(s2) || marketplace.exists(s2) || s2 === 'covenant' ? true : false)); return
+  }
+  if (req.method === 'GET' && url === '/x402/uptime') {
+    send(res, 200, proofkit.uptimeView(new URL(req.url, 'http://x').searchParams.get('days')))
+    return
+  }
+  if (req.method === 'GET' && url === '/x402/demo/status') {
+    send(res, 200, await proofkit.demoStatus(demoDeps()))
+    return
+  }
+  if (req.method === 'POST' && url === '/x402/demo/pay') {
+    readBody(req, async (err, payload) => {
+      if (err) { send(res, err.status || 400, { error: 'bad json' }); return }
+      try {
+        const out = await proofkit.demoPay({ slug: payload?.route, ip: clientIp(req) }, demoDeps())
+        x402r.log('paid', { slug: out.route, path: '/api/' + out.route, price: String(out.priceUsdg) }, { status: 200 })
+        send(res, 200, out)
+      } catch (e) {
+        if (e.retryAfterSec) res.setHeader('Retry-After', String(e.retryAfterSec))
+        send(res, e.status || 502, { ok: false, error: String(e.message || e).slice(0, 200), retryAfterSec: e.retryAfterSec, steps: e.steps })
+      }
+    })
+    return
+  }
+  if (req.method === 'POST' && url === '/x402/marketplace/probe') {
+    readBody(req, async (err, payload) => {
+      if (err) { send(res, err.status || 400, { error: 'bad json' }); return }
+      const rl2 = ratelimit.check(`probe:ip:${clientIp(req)}`, 12, 3600000)
+      if (!rl2.allowed) { res.setHeader('Retry-After', String(rl2.retryAfterSec)); send(res, 429, { ok: false, error: 'too many test requests; try again later', retryAfterSec: rl2.retryAfterSec }); return }
+      const t0 = Date.now()
+      try {
+        const hdrs = marketplace.sanitizePrivateHeaders(payload?.headers) || undefined
+        const json = await marketplace.fetchJson(String(payload?.upstream || ''), 8000, 0, hdrs)
+        const text = JSON.stringify(json)
+        send(res, 200, { ok: true, ms: Date.now() - t0, type: Array.isArray(json) ? 'array' : typeof json, keys: json && typeof json === 'object' && !Array.isArray(json) ? Object.keys(json).slice(0, 12) : [], bytes: text.length, preview: text.slice(0, 400) })
+      } catch (e) {
+        send(res, 200, { ok: false, ms: Date.now() - t0, error: String(e.message || e).slice(0, 200) })
+      }
+    })
+    return
+  }
+
   // Settlement-only, hash-level audit export. This intentionally does not
   // classify generic transfers to/from the facilitator wallet as settlements.
   if (req.method === 'GET' && url === '/x402/audit/settlements') {
@@ -1513,6 +1596,7 @@ server.requestTimeout = 15000
 server.headersTimeout = 10000
 server.keepAliveTimeout = 5000
 server.listen(PORT, HOST, () => console.log(`covenant-rpc-proxy on ${HOST}:${PORT}`))
+proofkit.startUptimeRecorder(() => facilitator.currentBlock())
 
 // Free nonces whose broadcast tx provably reverted/was dropped (see facilitator.settle). Never touches confirmed/unknown ones.
 const reconcile = () => facilitator.reconcilePending().then(n => n && console.log(`[reconcile] released ${n} dead pending nonce(s)`)).catch(e => console.error('[reconcile]', e.message))
