@@ -2,7 +2,7 @@
 
 MCP server for [COVENANT](https://covenantx402.com): x402 paid APIs, an encrypted credential vault and agent wallets on **Robinhood Chain**. Lets an agent discover paid APIs, read real receipts, keep secrets out of the model, and (only if you opt in) pay in USDG within hard limits.
 
-Works with Claude Code, Claude Desktop, Cursor and any MCP client. **28 tools · 5 resources · 4 prompts** (24 tools until you configure a wallet).
+Works with Claude Code, Claude Desktop, Cursor and any MCP client. **30 tools · 5 resources · 4 prompts** (26 tools until you configure a wallet).
 
 ## Install
 
@@ -40,6 +40,7 @@ It exposes the **16 discovery/read tools, 5 resources and 4 prompts**. It holds 
 | `covenant_receipts` | Recent real settlements with tx hash and explorer link |
 | `covenant_reputation` | Explainable 0-100 score for an address |
 | `covenant_stats` / `covenant_leaderboard` / `covenant_usage` | Aggregate counters, top payers, daily usage |
+| `covenant_audit` / `covenant_audit_snapshot` | Reconciled settlement totals (external payers vs self-tests) and the weekly SHA-256 snapshot. Use these, not `covenant_stats`, to judge real usage. `covenant_receipts` rows carry a `category`. |
 | `covenant_supported_rails` / `covenant_solana_info` | Declared schemes and networks |
 | `covenant_marketplace_earnings` / `covenant_balance` | Seller earnings, buyer prepaid balance |
 | `covenant_session_status` | Remaining calls of a prepaid session |

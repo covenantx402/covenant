@@ -159,12 +159,27 @@ export function createCore(cfg, { fetchImpl = fetch } = {}) {
     }
   }
   async function receipts(limit = 10) {
-    const r = await getJson('/x402/billing')
+    const [r, a] = await Promise.all([getJson('/x402/billing'), getJson('/x402/audit/settlements')])
+    // category comes from the settlement audit; 'unknown' if the audit is unreachable, never guessed
+    const category = new Map((a.status < 400 ? a.body?.rows || [] : []).map((x) => [String(x.txHash).toLowerCase(), clean(x.category)]))
     const rows = (r.body?.rows || []).slice(0, Math.max(1, Math.min(50, Number(limit) || 10)))
     return {
       total: (r.body?.rows || []).length,
-      receipts: rows.map((x) => ({ route: String(x.api).replace(/^\/api/, ''), usdg: x.usdg, payer: x.payer, txHash: x.txHash, time: new Date(x.t).toISOString(), explorer: `${EXPLORER}/tx/${x.txHash}` })),
+      receipts: rows.map((x) => ({ route: String(x.api).replace(/^\/api/, ''), usdg: x.usdg, payer: x.payer, txHash: x.txHash, category: category.get(String(x.txHash).toLowerCase()) || 'unknown', time: new Date(x.t).toISOString(), explorer: `${EXPLORER}/tx/${x.txHash}` })),
     }
+  }
+  async function audit() {
+    const b = need(await getJson('/x402/audit/settlements'), 'audit')
+    const t = b.totals || {}
+    return {
+      currentFacilitator: b.currentFacilitator, methodology: clean(b.methodology),
+      totals: { settlements: t.count, usdg: t.total, external: t.externalPayer, selfTest: t.selfTest, otherFacilitator: t.otherFacilitator },
+      note: 'external = payer is a different wallet from the facilitator; payer independence is not verified. Self-tests are not usage.',
+    }
+  }
+  async function auditSnapshot() {
+    const b = need(await getJson('/x402/audit/snapshot/latest'), 'audit snapshot')
+    return { schema: clean(b.schema), generatedAt: clean(b.generatedAt), auditSha256: clean(b.auditSha256), settlements: b.audit?.totals?.count, url: `${cfg.gateway}/x402/audit/snapshot/latest` }
   }
   const reputation = async (address) => need(await getJson(`/reputation/${addr(address)}`), 'reputation')
   const explorerSafe = (tx) => { try { return explorerLink(tx) } catch { return null } }
@@ -380,7 +395,7 @@ export function createCore(cfg, { fetchImpl = fetch } = {}) {
   }
 
   return {
-    status, listApis, inspectRoute, receipts, reputation, explorerLink, stats, leaderboard, usage, supportedRails, solanaInfo, marketplaceEarnings, balance, sessionStatus,
+    status, listApis, inspectRoute, receipts, audit, auditSnapshot, reputation, explorerLink, stats, leaderboard, usage, supportedRails, solanaInfo, marketplaceEarnings, balance, sessionStatus,
     registerAgent, whoami, revokeSelfKey, vaultStatus, vaultList, vaultSet, vaultDelete, vaultBroker, walletsList, walletCreate,
     pay, openSession, sessionRedeem, spendSummary, _state: () => ({ spent, agentKeyLoaded: !!agentKey }),
   }

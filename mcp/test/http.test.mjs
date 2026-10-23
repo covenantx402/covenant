@@ -23,7 +23,7 @@ const post = (body, headers = {}) => fetch(base + '/mcp', { method: 'POST', head
 {
   const c = new Client({ name: 'http-test', version: '0' }); await c.connect(new StreamableHTTPClientTransport(new URL(base + '/mcp')))
   const tools = (await c.listTools()).tools, names = tools.map((t) => t.name)
-  assert.strictEqual(names.length, 16, `expected 16 read-only tools, got ${names.length}: ${names.join(',')}`)
+  assert.strictEqual(names.length, 18, `expected 18 read-only tools, got ${names.length}: ${names.join(',')}`)
   for (const bad of ['covenant_pay', 'covenant_open_session', 'covenant_session_redeem', 'covenant_wallet_create', 'covenant_register_agent', 'covenant_whoami', 'covenant_revoke_self_key', 'covenant_vault_set', 'covenant_vault_list', 'covenant_vault_delete', 'covenant_vault_broker', 'covenant_wallets_list']) assert.ok(!names.includes(bad), `${bad} must not exist on the hosted server`)
   assert.ok(tools.every((t) => t.annotations?.readOnlyHint === true), 'every hosted tool is read-only')
   assert.strictEqual((await c.listResources()).resources.length, 5); assert.ok((await c.listPrompts()).prompts.length >= 1)
@@ -33,7 +33,7 @@ const post = (body, headers = {}) => fetch(base + '/mcp', { method: 'POST', head
   assert.strictEqual(bad.isError, true, 'calling a removed tool must fail'); assert.match(bad.text, /not found/i); assert.ok(!/settled|transaction/i.test(bad.text))
   const spend = JSON.parse((await c.readResource({ uri: 'covenant://spend' })).contents[0].text); assert.strictEqual(spend.walletConfigured, false)
   await c.close()
-  ok(`real MCP client over HTTP: 16 read-only tools, 5 resources, no spend/identity/vault/wallet tool exists even with credentials in env, live status ok`)
+  ok(`real MCP client over HTTP: 18 read-only tools, 5 resources, no spend/identity/vault/wallet tool exists even with credentials in env, live status ok`)
 }
 
 // protocol + hardening

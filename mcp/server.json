@@ -3,7 +3,7 @@
   "name": "io.github.covenantx402/covenant",
   "title": "COVENANT",
   "description": "Discover x402 paid APIs, keep secrets in a vault, pay in USDG on Robinhood Chain, with spend caps.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "repository": {
     "url": "https://github.com/covenantx402/covenant",
     "source": "github",
@@ -14,7 +14,7 @@
     {
       "registryType": "npm",
       "identifier": "@covenantx402/mcp",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"

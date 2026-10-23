@@ -6,7 +6,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { loadConfig, createCore } from './core.js'
 
-export const VERSION = '0.3.0'
+export const VERSION = '0.3.1'
 const ADDR = z.string().regex(/^0x[0-9a-fA-F]{40}$/)
 const ROUTE = z.string().min(1).max(40).describe('route slug, e.g. "alerts" (not a URL)')
 const NAME = z.string().regex(/^[a-zA-Z0-9_.-]{1,64}$/).describe('vault entry name, 1-64 chars of [A-Za-z0-9_.-]')
@@ -46,6 +46,8 @@ export function buildServer(cfg, core = createCore(cfg), { remote = false } = {}
   tool('covenant_receipts', 'Recent on-chain receipts', 'Most recent real settlements with transaction hashes and explorer links.', { limit: z.number().int().min(1).max(50).optional() }, RO, ({ limit }) => core.receipts(limit))
   tool('covenant_reputation', 'Reputation score', 'Explainable 0-100 reputation of an address, derived from its settled payments (each anchored to a tx hash).', { address: ADDR }, RO, ({ address }) => core.reputation(address))
   tool('covenant_explorer_link', 'Explorer link', 'Robinhood Chain explorer URL for a transaction hash.', { tx: z.string().regex(/^0x[0-9a-fA-F]{64}$/) }, RO, ({ tx }) => ({ url: core.explorerLink(tx) }))
+  tool('covenant_audit', 'Settlement audit', 'Reconciled settlement totals: external payers vs self-tests (a wallet paying itself), with the methodology. Use this, not covenant_stats, to judge real usage.', {}, RO, () => core.audit())
+  tool('covenant_audit_snapshot', 'Weekly audit snapshot', 'SHA-256 and timestamp of the latest weekly settlement-ledger snapshot, so a third party can reproduce the totals.', {}, RO, () => core.auditSnapshot())
   tool('covenant_stats', 'Gateway statistics', 'Aggregate counters: paid routes, 402 gate hits, on-chain settlements, USDG settled.', {}, RO, () => core.stats())
   tool('covenant_leaderboard', 'Top payers', 'Top paying addresses by settled USDG.', {}, RO, () => core.leaderboard())
   tool('covenant_usage', 'Daily usage', 'Daily hits, paid calls and USDG for the last days.', {}, RO, () => core.usage())
