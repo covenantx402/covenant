@@ -265,9 +265,12 @@ function settlementAudit(chainId = DEFAULT_CHAIN_ID) {
     .map(r => {
       const payer = String(r.payer).toLowerCase()
       const payTo = String(r.to).toLowerCase()
-      const category = payTo !== currentFacilitator
-        ? 'legacy-or-other-facilitator'
-        : payer === currentFacilitator ? 'facilitator-self-payer' : 'external-payer'
+      // payer === payTo is a wallet paying itself: a self-test, whichever
+      // facilitator address it was. Only a payment to a different address
+      // from the payer that is not the current facilitator is "other".
+      const category = payer === payTo
+        ? (payTo === currentFacilitator ? 'self-test-current' : 'self-test-legacy')
+        : payTo !== currentFacilitator ? 'other-facilitator' : 'external-payer'
       return {
         t: r.t,
         txHash: r.txHash,
@@ -294,13 +297,16 @@ function settlementAudit(chainId = DEFAULT_CHAIN_ID) {
     assetSymbol: c.usdcSymbol,
     currentFacilitator: currentFacilitator || null,
     source: 'facilitator successful-settlement ledger',
-    methodology: 'Rows are successful facilitator settlement records only. Generic token transfers, seller payouts, refunds, and operational wallet activity are excluded. Records directed to a historical or other facilitator are kept separate from the current facilitator totals.',
+    methodology: 'Rows are successful facilitator settlement records only. Generic token transfers, seller payouts, refunds, and operational wallet activity are excluded. A self-test is a wallet paying itself, on the current or an earlier facilitator address. External means the payer is a different wallet from the facilitator; the payer\'s independence is not verified.',
     totals: {
       count: rows.length,
       total: Math.round(rows.reduce((sum, r) => sum + Number(r.valueFormatted || 0), 0) * 1e6) / 1e6,
       externalPayer: summarize('external-payer'),
-      facilitatorSelfPayer: summarize('facilitator-self-payer'),
-      legacyOrOtherFacilitator: summarize('legacy-or-other-facilitator'),
+      selfTest: (() => {
+        const cur = summarize('self-test-current'), old = summarize('self-test-legacy')
+        return { count: cur.count + old.count, total: Math.round((cur.total + old.total) * 1e6) / 1e6, current: cur, legacy: old }
+      })(),
+      otherFacilitator: summarize('other-facilitator'),
     },
     rows,
   }
