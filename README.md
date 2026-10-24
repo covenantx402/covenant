@@ -131,12 +131,19 @@ Every settlement is replay-guarded by a persisted `(chain_id, nonce)` pair and a
 
 ## Who pays gas, and the per-chain price floor
 
-Buyers never submit an on-chain transaction or hold a gas token — they only
-*sign* an off-chain EIP-712 authorization (free). The **facilitator**
-(COVENANT's settlement wallet) submits the on-chain `transferFrom` and pays
-that gas. This is the same split every x402 facilitator uses (Coinbase CDP,
-PayAI, Dexter, etc.) — it's what "gasless payment" means in this protocol,
-not something COVENANT does differently.
+Once the buyer has sufficient token allowance for the facilitator on the
+selected chain, they only *sign* an off-chain EIP-712 authorization for
+settlement. The **facilitator** (COVENANT's settlement wallet) submits the
+on-chain `transferFrom` and pays that transaction's gas.
+
+The initial approval, or a later increase when allowance is insufficient,
+is a separate on-chain transaction. The provided EOA example sends
+`token.approve(spender, amount)` from the buyer's wallet, which needs enough
+native balance for the approval's transaction fees. The facilitator does
+not create that approval during settlement. `GET /chains` checks RPC and
+facilitator gas readiness; it does not establish the buyer's allowance or
+ability to pay approval gas. Check those prerequisites before treating a
+new wallet as ready to pay.
 
 What differs between facilitators is how (or whether) they recover that gas
 cost. Coinbase CDP charges the seller a flat `$0.001` per on-chain

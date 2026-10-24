@@ -46,7 +46,7 @@ On the public Robinhood rail, the asset is USDG at `0x5fc5360D0400a0Fd4f2af552AD
 Only continue after the user explicitly approves a payment.
 
 1. Request a paid route and read its requirement.
-2. Approve the advertised `extra.spender` to spend no more than the route price.
+2. Read the payer's token allowance for the advertised `extra.spender` on the selected chain. If it is insufficient, approve no more than the route price and wait for confirmation before continuing. This approval is a separate on-chain transaction from the payer's wallet and needs enough native balance for its fees. If that balance is insufficient, report the approval prerequisite and stop; facilitator-funded settlement does not fund the payer's approval. `GET /chains` readiness does not check this payer-specific prerequisite.
 3. Sign the EIP-712 `PaymentIntent`:
 
 ```js
