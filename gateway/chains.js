@@ -23,7 +23,7 @@ const CHAINS = {
     usdc: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', // USDG on Robinhood — not Circle-issued, kept for backward compat
     usdcSymbol: 'USDG',
     decimals: 6,
-    explorer: 'https://scan.robinhood.com', // best-effort, not verified this session
+    explorer: 'https://robinhoodchain.blockscout.com',
     // Robinhood's native gas token has no meaningful external USD market —
     // settlement cost here rounds to zero in any realistic pricing model.
     minSettlePriceUsd: 0,
