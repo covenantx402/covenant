@@ -27,11 +27,12 @@ export const USDC_ADDRESSES: Record<Network, string> = {
 
 export const ASSET_META: Record<Network, { name: string; version: string }> = {
   base: { name: "USD Coin", version: "2" },
-  "base-sepolia": { name: "USD Coin", version: "2" },
+  "base-sepolia": { name: "USDC", version: "2" },
   polygon: { name: "USD Coin", version: "2" },
   arbitrum: { name: "USD Coin", version: "2" },
   optimism: { name: "USD Coin", version: "2" },
-  robinhood: { name: "USDG", version: "2" },
+  // EIP-712 domain of USDG on chain 4663: DOMAIN_SEPARATOR() = keccak(name "Global Dollar", version "1").
+  robinhood: { name: "Global Dollar", version: "1" },
 };
 
 export interface RoutePricing {
