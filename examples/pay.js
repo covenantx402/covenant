@@ -15,26 +15,29 @@
 //   WALLET_KEY=0x... node examples/pay.js
 //   WALLET_KEY=0x... COVENANT_RESOURCE=/x402/api/signals node examples/pay.js
 //
+// Other chains (see GET /chains for which are settlement-ready):
+//   COVENANT_CHAIN=8453 WALLET_KEY=0x... node examples/pay.js     # Base, pays in USDC
+//   (RPC for that chain: COVENANT_PAY_RPC=<url>; defaults to a public RPC)
+//
 // Or pass as CLI arg (legacy, still works):
 //   node examples/pay.js <private-key-with-USDG>
 const { ethers } = require('ethers')
 
 const GATEWAY = process.env.COVENANT_GATEWAY || 'https://gateway.covenantx402.com'
-const RPC = process.env.COVENANT_RPC_UPSTREAM || 'https://robinhood-rpc.publicnode.com'
-const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'
-const CHAIN_ID = 4663
-const RESOURCE = process.env.COVENANT_RESOURCE || '/x402/api/alerts'
+const CHAIN_ID = Number(process.env.COVENANT_CHAIN || 4663)
+const PUBLIC_RPC = {
+  4663: 'https://robinhood-rpc.publicnode.com',
+  8453: 'https://mainnet.base.org',
+  42161: 'https://arb1.arbitrum.io/rpc',
+  1: 'https://ethereum-rpc.publicnode.com',
+}
+const RPC = process.env.COVENANT_PAY_RPC || (CHAIN_ID === 4663 && process.env.COVENANT_RPC_UPSTREAM) || PUBLIC_RPC[CHAIN_ID]
+const BASE_RESOURCE = process.env.COVENANT_RESOURCE || '/x402/api/alerts'
+const RESOURCE = CHAIN_ID === 4663 ? BASE_RESOURCE : `${BASE_RESOURCE}${BASE_RESOURCE.includes('?') ? '&' : '?'}chain=${CHAIN_ID}`
 // Robinhood Chain's fee estimate can come back as ~0; some public RPCs then reject the tx. Keep a floor.
 const MIN_GAS = ethers.parseUnits('0.1', 'gwei')
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-// Must match the gateway's facilitator domain (see gateway/facilitator.js)
-const DOMAIN = {
-  name: 'COVENANT',
-  version: '1',
-  chainId: CHAIN_ID,
-  verifyingContract: USDG,
-}
 
 const TYPES = {
   PaymentIntent: [
@@ -56,6 +59,7 @@ async function main() {
     console.error('   or: node examples/pay.js <private-key-with-USDG>')
     process.exit(1)
   }
+  if (!RPC) { console.error('no RPC for chain', CHAIN_ID, '- set COVENANT_PAY_RPC'); process.exit(1) }
   const wallet = new ethers.Wallet(pk, new ethers.JsonRpcProvider(RPC))
 
   // 1. hit the paid endpoint, get the 402 requirements
@@ -67,12 +71,16 @@ async function main() {
   // don't parse that one as plain JSON here.
   const required = JSON.parse(Buffer.from(res.headers.get('x-payment-required-v1'), 'base64').toString())
   const req = required.accepts[0]
-  console.log('payment required:', req.description, '—', Number(req.maxAmountRequired) / 1e6, 'USDG')
+  if (req.network !== `eip155:${CHAIN_ID}`) { console.error('gateway answered for', req.network, 'not eip155:' + CHAIN_ID); process.exit(1) }
+  const ASSET = req.asset
+  // EIP-712 domain is always name COVENANT, verifying contract = the chain's payment asset
+  const DOMAIN = { name: 'COVENANT', version: '1', chainId: CHAIN_ID, verifyingContract: ASSET }
+  console.log('payment required:', req.description, '—', Number(req.maxAmountRequired) / 1e6, 'on', req.network)
 
   const spender = req.extra.spender
   if (!spender) { console.error('gateway has no settlement wallet configured'); process.exit(1) }
 
-  const usdg = new ethers.Contract(USDG, [
+  const usdg = new ethers.Contract(ASSET, [
     'function approve(address spender,uint256 value) returns (bool)',
     'function balanceOf(address) view returns (uint256)',
     'function allowance(address,address) view returns (uint256)',
@@ -82,7 +90,9 @@ async function main() {
   const allowance = await usdg.allowance(wallet.address, spender)
   if (allowance < BigInt(req.maxAmountRequired)) {
     console.log('approving', spender, '…')
-    const tx = await usdg.approve(spender, req.maxAmountRequired, { maxFeePerGas: MIN_GAS * 2n, maxPriorityFeePerGas: MIN_GAS, gasLimit: 80000n })
+    // the 0.1 gwei floor is only for Robinhood Chain's ~0 fee estimates; other chains use the node's own estimate
+    const opts = CHAIN_ID === 4663 ? { maxFeePerGas: MIN_GAS * 2n, maxPriorityFeePerGas: MIN_GAS, gasLimit: 80000n } : {}
+    const tx = await usdg.approve(spender, req.maxAmountRequired, opts)
     await tx.wait()
   }
 
@@ -108,7 +118,7 @@ async function main() {
     const r = await fetch(`${GATEWAY}/facilitator/settle`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ intent, signature }),
+      body: JSON.stringify({ intent, signature, chainId: CHAIN_ID }),
     })
     settle = await r.json()
     if (settle.success) break
@@ -119,11 +129,13 @@ async function main() {
   }
 
   if (!settle.success) {
-    console.error('settle failed:', settle.errorReason)
+    console.error('settle failed:', settle.errorReason || settle.error || JSON.stringify(settle))
     process.exit(1)
   }
   console.log('SETTLED on-chain:', settle.transaction)
-  console.log('explorer: https://robinhoodchain.blockscout.com/tx/' + settle.transaction)
+  const chainsInfo = await (await fetch(`${GATEWAY}/chains`)).json().catch(() => null)
+  const explorer = chainsInfo?.chains?.find(c => c.id === CHAIN_ID)?.explorer || 'https://robinhoodchain.blockscout.com'
+  console.log('explorer: ' + explorer + '/tx/' + settle.transaction)
 
   // 5. replay the receipt as X-PAYMENT to get the paid content (one receipt = one delivery)
   const paid = await fetch(`${GATEWAY}${RESOURCE}`, { headers: { 'X-PAYMENT': settle.payment } })
