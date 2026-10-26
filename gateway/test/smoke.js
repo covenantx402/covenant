@@ -249,7 +249,11 @@ async function main() {
     assert.strictEqual(sup.json.x402Version, 1)
     assert.ok(Array.isArray(sup.json.kinds) && sup.json.kinds.length > 0)
     assert.ok(sup.json.kinds.every(k => k.scheme && k.network && k.asset))
-    assert.ok(sup.json.kinds.some(k => k.network === 'eip155:4663' && k.scheme === 'exact')); ok('GET /supported lists exact/eip155:4663 as a supported kind')
+    // A chain is advertised in kinds[] only when it can settle now; otherwise it must be
+    // listed in unavailable[] with a reason. The smoke wallet has no gas, so either is valid.
+    assert.ok(Array.isArray(sup.json.unavailable))
+    assert.ok(sup.json.kinds.some(k => k.network === 'eip155:4663' && k.scheme === 'exact') ||
+      sup.json.unavailable.some(u => u.network === 'eip155:4663' && u.reason)); ok('GET /supported accounts for eip155:4663 (kind if ready, else unavailable with reason)')
     const supAlias = await req('GET', '/facilitator/supported')
     assert.strictEqual(supAlias.status, 200)
     assert.deepStrictEqual(supAlias.json.kinds, sup.json.kinds); ok('GET /facilitator/supported alias matches /supported exactly')

@@ -279,7 +279,22 @@ function registerDiscoveryRoutes({
      COVENANT's other facilitator ops (verify/settle/status) all live
      under that prefix — callers that guessed either path find it. */
   async function supported(req, res) {
-    const chainList = facilitator.chains.listChains()
+    // Only advertise chains that can settle RIGHT NOW (wallet gas funded, RPC up).
+    // A chain that fails readiness is omitted and listed under `unavailable`
+    // instead, so a client never picks a rail that would fail. Readiness is
+    // cached 20s so discovery does not hit every RPC on each request.
+    const now = Date.now()
+    if (!supported._rc || now - supported._rc.t > 20000) {
+      const all = facilitator.chains.listChains()
+      const states = await Promise.all(all.map(async c => {
+        try { return [c.id, await facilitator.chainReadiness(c.id)] } catch (e) { return [c.id, { settlementReady: false, reason: 'readiness check failed' }] }
+      }))
+      supported._rc = { t: now, ready: new Map(states) }
+    }
+    const readyOf = id => supported._rc.ready.get(id)
+    const chainList = facilitator.chains.listChains().filter(c => readyOf(c.id)?.settlementReady)
+    const unavailable = facilitator.chains.listChains().filter(c => !readyOf(c.id)?.settlementReady)
+      .map(c => ({ network: `eip155:${c.id}`, name: c.name, reason: readyOf(c.id)?.reason || 'not ready' }))
     const kinds = []
     const signers = {}
     for (const c of chainList) {
@@ -356,6 +371,7 @@ function registerDiscoveryRoutes({
     send(res, 200, {
       x402Version: 1,
       kinds,
+      unavailable,
       // bazaar: discovery extension is live on at least one route
       // (/x402/premium) today — see openapi() above for the fuller
       // per-route coverage status.
