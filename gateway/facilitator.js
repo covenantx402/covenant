@@ -317,6 +317,38 @@ function settlementAudit(chainId = DEFAULT_CHAIN_ID) {
   }
 }
 
+/** Settlement audit across every chain that has settlements. Rows carry chain + symbol + explorer
+ * so a reader can verify each one on the right explorer; totals are summed (USDG and USDC are both
+ * 1:1 USD stablecoins) and also broken out per chain in byChain. The single-chain audit above is unchanged. */
+function settlementAuditAll() {
+  const per = []
+  for (const c of chains.listChains()) {
+    let a
+    try { a = settlementAudit(c.id) } catch (_e) { continue }
+    if (!a.rows.length && c.id !== DEFAULT_CHAIN_ID) continue
+    per.push({ c, a })
+  }
+  const r6 = n => Math.round(n * 1e6) / 1e6
+  const rows = per.flatMap(({ c, a }) => a.rows.map(r => ({ ...r, chainId: c.id, chainName: c.name, symbol: c.usdcSymbol, explorer: c.explorer, asset: c.usdc })))
+    .sort((x, y) => y.t - x.t)
+  const sum = pick => per.reduce((acc, { a }) => { const b = pick(a.totals); return { count: acc.count + b.count, total: r6(acc.total + b.total) } }, { count: 0, total: 0 })
+  const cur = sum(t => t.selfTest.current), legacy = sum(t => t.selfTest.legacy), demo = sum(t => t.selfTest.demo)
+  return {
+    chains: per.map(({ c }) => c.id),
+    source: 'facilitator successful-settlement ledger, all chains',
+    methodology: per[0] ? per[0].a.methodology : '',
+    totals: {
+      count: rows.length,
+      total: r6(per.reduce((n, { a }) => n + a.totals.total, 0)),
+      externalPayer: sum(t => t.externalPayer),
+      selfTest: { count: cur.count + legacy.count + demo.count, total: r6(cur.total + legacy.total + demo.total), current: cur, legacy, demo },
+      otherFacilitator: sum(t => t.otherFacilitator),
+    },
+    byChain: per.map(({ c, a }) => ({ chainId: c.id, chainName: c.name, symbol: c.usdcSymbol, explorer: c.explorer, totals: a.totals })),
+    rows,
+  }
+}
+
 /** Operational readiness for a chain. A chain can be configured and its RPC
  * live while the settlement wallet has no native gas — accepting a payment
  * challenge in that state would be misleading because transferFrom cannot
@@ -920,7 +952,7 @@ const _test = { normNonce, _providers, finalizeSettlement, resolvePending, stmts
 
 module.exports = {
   _test,
-  verify, settle, publicView, publicViewAll, settlementAudit, chainReadiness, paymentRecordFor, claimReceipt, settleLogAll,
+  verify, settle, publicView, publicViewAll, settlementAudit, settlementAuditAll, chainReadiness, paymentRecordFor, claimReceipt, settleLogAll,
   isConfigured,
   finalizeSplits, cancelSplits, currentBlock, provider, refundPayment, payout, claimNonce, releaseNonce,
   claimChannel, reconcilePending, inspectTx, retryFailedSplits, retryRefundsDue, markRefundDue, clearRefundDue, normNonce,

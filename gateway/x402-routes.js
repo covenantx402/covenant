@@ -55,7 +55,8 @@ function requirement(route, resource, chainId = chains.DEFAULT_CHAIN_ID, spender
     network: `eip155:${c.id}`,
     maxAmountRequired: priceToAtomic(route.price, c.id),
     resource,
-    description: route.description,
+    // Stored descriptions predate multichain and end in "USDG on Robinhood 4663"; the label must follow the chain actually quoted.
+    description: String(route.description || '').replace(/\s*[—-]\s*USDG on Robinhood 4663\s*$/i, '').replace(/\s*on Robinhood 4663\s*$/i, '') + ` — ${c.usdcSymbol} on ${c.name}`,
     mimeType: 'application/json',
     payTo,
     maxTimeoutSeconds: 60,
@@ -117,7 +118,7 @@ function create({ path: p, price, description, payTo }) {
     slug,
     path: p,
     price: String(price),
-    description: description || `COVENANT paid API ${p} — USDG on Robinhood 4663`,
+    description: description || `COVENANT paid API ${p}`,
     payTo: payTo || process.env.COVENANT_X402_PAYTO || '0x0000000000000000000000000000000000000000',
     createdAt: Date.now(),
     hits: 0
@@ -138,9 +139,9 @@ function seed() {
   if (process.env.COVENANT_SEED_ROUTES === '0') return
   if (stmts.count.get().n > 0) return
   const defaults = [
-    { path: '/alerts', price: '0.01', description: 'COVENANT whale alerts — USDG on Robinhood 4663' },
-    { path: '/signals', price: '0.05', description: 'COVENANT agent signals — USDG on Robinhood 4663' },
-    { path: '/market-analytics', price: '0.05', description: 'COVENANT market analytics — liquidity, breadth, turnover rankings on Robinhood 4663' },
+    { path: '/alerts', price: '0.01', description: 'COVENANT whale alerts' },
+    { path: '/signals', price: '0.05', description: 'COVENANT agent signals' },
+    { path: '/market-analytics', price: '0.05', description: 'COVENANT market analytics — liquidity, breadth, turnover rankings' },
   ]
   for (const d of defaults) {
     try { create(d) } catch { /* already present */ }

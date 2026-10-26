@@ -21,7 +21,7 @@ let feedTimer = null
 let feedSeen = null
 function feedTick() {
   try {
-    const a = facilitator.settlementAudit()
+    const a = facilitator.settlementAuditAll()
     const fresh = feedSeen ? a.rows.filter(r => !feedSeen.has(r.txHash)) : []
     feedSeen = new Set(a.rows.map(r => r.txHash))
     for (const r of fresh.reverse()) {
@@ -1396,20 +1396,20 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.startsWith('/x402/tx/')) {
     const h = decodeURIComponent(url.slice('/x402/tx/'.length))
     if (!proofkit.HASH.test(h)) { send(res, 400, { error: 'expected a 0x-prefixed 32-byte transaction hash' }); return }
-    send(res, 200, proofkit.txView(h, () => facilitator.settlementAudit()))
+    send(res, 200, proofkit.txView(h, () => facilitator.settlementAuditAll()))
     return
   }
   if (req.method === 'GET' && url.startsWith('/x402/receipt/') && url.endsWith('.svg')) {
     const h = decodeURIComponent(url.slice('/x402/receipt/'.length, -4))
     if (!proofkit.HASH.test(h)) { send(res, 400, { error: 'bad transaction hash' }); return }
-    const v = proofkit.txView(h, () => facilitator.settlementAudit())
+    const v = proofkit.txView(h, () => facilitator.settlementAuditAll())
     if (!v.found) { send(res, 404, { error: 'not a settlement in the COVENANT ledger' }); return }
     sendSvg(proofkit.receiptSvg(v.row)); return
   }
   if (req.method === 'GET' && url.startsWith('/x402/badge/') && url.endsWith('.svg')) {
     const slug = decodeURIComponent(url.slice('/x402/badge/'.length, -4))
     if (!proofkit.SLUG.test(slug)) { send(res, 400, { error: 'bad slug' }); return }
-    sendSvg(proofkit.badgeFor(slug, () => facilitator.settlementAudit(), s2 => x402r.has(s2) || marketplace.exists(s2) || s2 === 'covenant' ? true : false)); return
+    sendSvg(proofkit.badgeFor(slug, () => facilitator.settlementAuditAll(), s2 => x402r.has(s2) || marketplace.exists(s2) || s2 === 'covenant' ? true : false)); return
   }
   if (req.method === 'GET' && url === '/x402/uptime') {
     send(res, 200, proofkit.uptimeView(new URL(req.url, 'http://x').searchParams.get('days')))
@@ -1454,15 +1454,18 @@ const server = http.createServer(async (req, res) => {
   // Settlement-only, hash-level audit export. This intentionally does not
   // classify generic transfers to/from the facilitator wallet as settlements.
   if (req.method === 'GET' && url === '/x402/audit/settlements') {
-    send(res, 200, facilitator.settlementAudit())
+    const q = new URL(req.url, 'http://x').searchParams.get('chain')
+    if (q === 'all') { send(res, 200, facilitator.settlementAuditAll()); return }
+    if (q != null && !facilitator.chains.isSupported(q)) { send(res, 400, { error: `unsupported chain: ${q}`, supported: facilitator.chains.listChains().map(c => c.id), hint: 'use ?chain=<id> or ?chain=all' }); return }
+    send(res, 200, facilitator.settlementAudit(q != null ? Number(q) : undefined))
     return
   }
 
   // Live settlement feed: the same public, hash-level rows as /x402/audit/settlements,
   // pushed as Server-Sent Events. One shared 3s poller runs only while clients are connected.
   if (req.method === 'GET' && url === '/x402/feed') {
-    const a = facilitator.settlementAudit()
-    send(res, 200, { chainId: a.chainId, chainName: a.chainName, assetSymbol: a.assetSymbol, totals: a.totals, rows: a.rows.slice(0, 25) })
+    const a = facilitator.settlementAuditAll()
+    send(res, 200, { chains: a.chains, byChain: a.byChain, totals: a.totals, rows: a.rows.slice(0, 25) })
     return
   }
   if (req.method === 'GET' && url === '/x402/feed/stream') {

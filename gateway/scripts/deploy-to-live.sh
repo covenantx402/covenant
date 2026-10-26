@@ -27,6 +27,7 @@ HEALTH_URL="http://127.0.0.1:8792/x402/health"
 FILES=(server.js facilitator.js agent-vault.js x402-routes.js balance.js
        ratelimit.js db.js x402-v2.js sessions.js reputation.js wallets.js
        keys.js marketplace.js data-providers.js article-extract.js
+       proofkit.js chains.js demo-wallet.js upto-demo.js batch.js solana.js
        routes/discovery.js)
 
 echo "== COVENANT deploy: repo -> live =="

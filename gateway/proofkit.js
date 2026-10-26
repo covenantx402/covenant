@@ -94,7 +94,7 @@ function txView(hash, audit) {
   let a = ledger(audit), row = find(a)
   if (!row) { auditCache = { t: 0, v: null }; a = ledger(audit); row = find(a) }   // paid seconds ago: look once more, fresh
   if (!row) return { found: false, txHash: hash, note: 'Not a settlement in the COVENANT ledger. It may still be a normal transfer on-chain; check the explorer.' }
-  return { found: true, txHash: row.txHash, row: { ...row, slug: slugOf(row.resource) }, asset: a.asset, chainId: a.chainId, methodology: a.methodology }
+  return { found: true, txHash: row.txHash, row: { ...row, slug: slugOf(row.resource) }, asset: row.asset || a.asset || null, chainId: row.chainId ?? a.chainId, chainName: row.chainName, symbol: row.symbol, explorer: row.explorer, methodology: a.methodology }
 }
 
 function receiptSvg(row) {
@@ -104,7 +104,7 @@ function receiptSvg(row) {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="COVENANT settlement receipt">
 <rect width="1200" height="630" fill="#0a0a0a"/><rect x="40" y="40" width="1120" height="550" rx="28" fill="#141414" stroke="#2a2a2a"/>
 <text x="90" y="112" fill="#8a8a90" font-family="ui-monospace,Menlo,monospace" font-size="22" letter-spacing="4">COVENANT · SETTLEMENT RECEIPT</text>
-<text x="90" y="230" fill="#ffffff" font-family="system-ui,Helvetica,Arial,sans-serif" font-size="108" font-weight="700">${esc(Number(row.valueFormatted).toFixed(2))} <tspan font-size="44" fill="#8a8a90">USDG</tspan></text>
+<text x="90" y="230" fill="#ffffff" font-family="system-ui,Helvetica,Arial,sans-serif" font-size="108" font-weight="700">${esc(Number(row.valueFormatted).toFixed(2))} <tspan font-size="44" fill="#8a8a90">${esc(row.symbol || 'USDG')}</tspan></text>
 <text x="90" y="292" fill="#d1d1d6" font-family="ui-monospace,Menlo,monospace" font-size="30">/${esc(api)}</text>
 <g font-family="ui-monospace,Menlo,monospace" font-size="24" fill="#d1d1d6">
 <text x="90" y="372" fill="#8a8a90">payer</text><text x="260" y="372">${esc(short(row.payer))}</text>
@@ -133,7 +133,7 @@ function badgeFor(slug, audit, known) {
   if (!known(slug)) return badgeSvg('COVENANT', 'unknown listing', false)
   const rows = a.rows.filter(r => r.category === 'external-payer' && slugOf(r.resource) === slug)
   const usd = rows.reduce((s, r) => s + Number(r.valueFormatted || 0), 0)
-  return badgeSvg('settled via COVENANT', rows.length ? `${rows.length} paid · ${usd.toFixed(2)} USDG` : 'listed · no payments yet', rows.length > 0)
+  return badgeSvg('settled via COVENANT', rows.length ? `${rows.length} paid · ${usd.toFixed(2)} USD` : 'listed · no payments yet', rows.length > 0)
 }
 
 // ---------------------------------------------------------------- live demo payment

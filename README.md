@@ -112,6 +112,10 @@ curl https://gateway.covenantx402.com/chains
 ```
 Returns every chain's id, asset address, decimals, and **live readiness** (RPC reachable, settlement wallet funded with native gas) — so an agent can pick a working rail before committing to a payment flow instead of discovering a dead RPC mid-settlement.
 
+**Live status (verified on-chain).** Robinhood Chain (USDG) and Base (USDC) have settled real payments. Ethereum and Arbitrum are implemented and tested in code but are not advertised until their settlement wallet is funded with native gas; `GET /supported` lists only chains that can settle right now and puts the rest under `unavailable` with the reason. First Base settlement: [`0x41cb4590…033ef`](https://basescan.org/tx/0x41cb4590a8bc66c215be021134d15413e75e02f2eb0b5785862b9dcd105033ef) (0.01 USDC, a self-test from our demo wallet, labelled as such in the audit).
+
+Try it on Base: `COVENANT_CHAIN=8453 WALLET_KEY=0x... node examples/pay.js` (the payer needs a little USDC and a little ETH for the one-time `approve`). The settlement audit covers every chain: `GET /x402/audit/settlements?chain=all`, or `?chain=8453` for one.
+
 Pass `?chain=<id>` on any `GET /x402/api/:slug` call (or `chainId` in the signed intent / settle body) to target a non-default chain. Omit it everywhere and behavior is unchanged from the single-chain era — Robinhood 4663 stays the default. Every chain gets its own EIP-712 domain (`chainId` is part of the signed domain), its own memoized RPC provider + settlement wallet instance, and its own nonce/settlement rows keyed by `(chain_id, ...)` — a signature valid on one chain cannot replay on another.
 
 ## How settlement works
