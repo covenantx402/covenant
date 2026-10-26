@@ -14,6 +14,25 @@ const keys = require('./keys')
 const facilitator = require('./facilitator')
 const marketplace = require('./marketplace')
 const proofkit = require('./proofkit')
+
+// ---- live settlement feed (SSE) ----
+const feedClients = new Set()
+let feedTimer = null
+let feedSeen = null
+function feedTick() {
+  try {
+    const a = facilitator.settlementAudit()
+    const fresh = feedSeen ? a.rows.filter(r => !feedSeen.has(r.txHash)) : []
+    feedSeen = new Set(a.rows.map(r => r.txHash))
+    for (const r of fresh.reverse()) {
+      const msg = 'event: settlement\ndata: ' + JSON.stringify({ row: r, totals: a.totals }) + '\n\n'
+      for (const c of feedClients) c.write(msg)
+    }
+    for (const c of feedClients) c.write(': ping\n\n')
+  } catch (e) { /* keep stream alive */ }
+}
+function startFeed() { if (!feedTimer) { feedSeen = null; feedTick(); feedTimer = setInterval(feedTick, 3000) } }
+function stopFeed() { if (feedTimer) { clearInterval(feedTimer); feedTimer = null; feedSeen = null } }
 const demoWallet = require('./demo-wallet')
 const balance = require('./balance')
 const { ethers } = require('ethers')
@@ -1436,6 +1455,23 @@ const server = http.createServer(async (req, res) => {
   // classify generic transfers to/from the facilitator wallet as settlements.
   if (req.method === 'GET' && url === '/x402/audit/settlements') {
     send(res, 200, facilitator.settlementAudit())
+    return
+  }
+
+  // Live settlement feed: the same public, hash-level rows as /x402/audit/settlements,
+  // pushed as Server-Sent Events. One shared 3s poller runs only while clients are connected.
+  if (req.method === 'GET' && url === '/x402/feed') {
+    const a = facilitator.settlementAudit()
+    send(res, 200, { chainId: a.chainId, chainName: a.chainName, assetSymbol: a.assetSymbol, totals: a.totals, rows: a.rows.slice(0, 25) })
+    return
+  }
+  if (req.method === 'GET' && url === '/x402/feed/stream') {
+    if (feedClients.size >= 200) { send(res, 503, { error: 'too many live listeners' }); return }
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' })
+    res.write('retry: 4000\n\n')
+    feedClients.add(res)
+    req.on('close', () => { feedClients.delete(res); if (!feedClients.size) stopFeed() })
+    startFeed()
     return
   }
 
